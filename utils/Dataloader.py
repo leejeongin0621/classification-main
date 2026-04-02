@@ -32,9 +32,11 @@ def LoadIMU_EPO_simple(load_path, subject_list, num_session=5, num_class=100, ep
 
             # (time, ch, class) -> (class, time, ch)
             x = np.transpose(x, (2, 0, 1))   # (100, 200, 30)
-            # channel_indexing = np.array([1,4,5,7,8])-1
-            # selected_channels=np.concatenate([channel_indexing*3, channel_indexing*3+1, channel_indexing*3+2]) 
-            # x = x[:, :, selected_channels]
+            # channel_indexing = [0,3,4,6,7]
+            # selected_channels = []
+            # for n in channel_indexing:
+            #     selected_channels.extend([3*n,3*n+1,3*n+2])
+            # x = x[:, :, selected_channels] # (100, 200, 15)
 
             # Normalize
             mu  = x.mean(axis=1, keepdims=True)   # (class, 1, ch)

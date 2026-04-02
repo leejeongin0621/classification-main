@@ -13,8 +13,8 @@ num_classes = 100   # 단어 수 (클래스 수)
 hidden_dim = 128
 num_layers = 2
 gap_dropout = 0.2
-nCh = 30
 nhead = 4
+nCh = 30
 IMU_conv_channel = 16
 conso_layers = 16
 
@@ -32,6 +32,21 @@ model = IMU_STGCN(
     edge_importance_weighting=True,
     dropout=gap_dropout
 ).to(device)
+
+# model = AGCN(
+#     num_class=num_classes,
+#     in_channels=3,
+#     graph_args={'max_hop': 1, 'dilation': 1},
+#     dropout=gap_dropout
+# ).to(device)
+
+# model = IMU_STGCNINCEPTION(
+#     num_class=num_classes,
+#     in_channels=3,
+#     graph_args={'max_hop': 1, 'dilation': 1},
+#     edge_importance_weighting=True,
+#     dropout=gap_dropout
+# ).to(device)
 
 # model = EMG_IMU_BiLSTM(
 #     num_classes=num_classes,
@@ -55,7 +70,7 @@ model = IMU_STGCN(
 #   conso_layers=conso_layers
 # ).to(device)
 
-# model = IMU_BiLSTM(
+#  model = IMU_BiLSTM(
 #    num_classes=num_classes,
 #    hidden_dim=hidden_dim,
 #    num_layers=num_layers,
@@ -65,8 +80,8 @@ model = IMU_STGCN(
 
 # 모델 전체 저장
 Path("models").mkdir(exist_ok=True)
-model_num = 6
-save_path = "./models/Model_6.pt"
+model_num = 20
+save_path = "./models/Model_20.pt"
 
 
 # 모델에 더미 입력 전달하여 정상 작동 확인
@@ -86,7 +101,7 @@ else:
 # 모델 전체 불러오기
 import torch
 
-model_num = 6
+model_num = 20
 
 save_path = "./models/Model_{}.pt".format(model_num)
 model_loaded = torch.load(save_path, weights_only=False, map_location=device)

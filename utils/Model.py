@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules.transformer import _get_clones
-from utils.tgcn import ConvTemporalGraphical
+from utils.tgcn import ConvTemporalGraphical, DynamicGraphConv,unit_gcn
 from utils.graph import Graph
 
 
-# ----------------------------
-# ST-GCN blocks (원본 그대로 사용)
-# ----------------------------
+#----------------------------
+#ST-GCN blocks (원본 그대로 사용)
+#----------------------------
 class IMU_STGCN(nn.Module):
     def __init__(self, in_channels, num_class, graph_args,
                  edge_importance_weighting, dropout):
@@ -20,19 +20,30 @@ class IMU_STGCN(nn.Module):
         self.register_buffer('A', A)
 
         # build networks
+    #     spatial_kernel_size = A.size(0)
+    #     temporal_kernel_size = 9
+    #     kernel_size = (temporal_kernel_size, spatial_kernel_size)
+    #     self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
+    #     self.st_gcn_networks = nn.ModuleList((
+    #     st_gcn(in_channels, 64,  kernel_size, 1, residual=False, dropout=0),
+    #     st_gcn(64,  64,  kernel_size, 1, dropout),
+    #     st_gcn(64,  64,  kernel_size, 1, dropout),
+    #     st_gcn(64,  128,  kernel_size, 2, dropout), # 200→100
+    #     st_gcn(128,  128, kernel_size, 1, dropout), 
+    #     st_gcn(128,  128, kernel_size, 1, dropout), 
+    #     st_gcn(128, 256, kernel_size, 2, dropout), # 100→50
+    #     st_gcn(256, 256, kernel_size, 1, dropout),  
+    # ))
+        
         spatial_kernel_size = A.size(0)
-        temporal_kernel_size = 7
+        temporal_kernel_size = 9
         kernel_size = (temporal_kernel_size, spatial_kernel_size)
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
         self.st_gcn_networks = nn.ModuleList((
-            st_gcn(in_channels, 64, kernel_size, 1, residual=False, dropout=0),
-            st_gcn(64, 64, kernel_size, 1, dropout),
-            st_gcn(64, 128, kernel_size, 2, dropout),
-            st_gcn(128, 128, kernel_size, 1, dropout),
-            st_gcn(128, 256, kernel_size, 2, dropout),
-            st_gcn(256, 256, kernel_size, 1, dropout),
-            
-        ))
+        st_gcn(in_channels, 64,  kernel_size, 1, residual=False, dropout=0),
+        st_gcn(64,  128,  kernel_size, 2, dropout), # 200→100
+        st_gcn(128, 256, kernel_size, 2, dropout), # 100→50
+    ))
 
         # initialize parameters for edge importance weighting
         if edge_importance_weighting:
@@ -50,7 +61,7 @@ class IMU_STGCN(nn.Module):
 
         # data normalization
         B,T,D = x_IMU.shape
-        x=x_IMU.view(B,T,10,3)
+        x=x_IMU.view(B,T,10,3) #10개일때와 5개일때 변경해야함
         x=x.permute(0,3,1,2).contiguous() 
         x=x.unsqueeze(-1) # (B,3,200,10,1) 형태로 변환하여 ST-GCN 입력에 맞춤
         N, C, T, V, M = x.size()
@@ -104,7 +115,8 @@ class IMU_STGCN(nn.Module):
         output = x.view(N, M, -1, t, v).permute(0, 2, 3, 4, 1)
 
         return output, feature
-
+    
+    
 class Zero(nn.Module):
     def forward(self, x):
         return 0
@@ -124,7 +136,7 @@ class st_gcn(nn.Module):
         assert kernel_size[0] % 2 == 1
         padding = ((kernel_size[0] - 1) // 2, 0)
 
-        self.gcn = ConvTemporalGraphical(in_channels, out_channels,
+        self.gcn =  ConvTemporalGraphical(in_channels, out_channels,
                                          kernel_size[1])
 
         self.tcn = nn.Sequential(
@@ -167,6 +179,331 @@ class st_gcn(nn.Module):
         x = self.tcn(x) + res
 
         return self.relu(x), A
+
+# #AGCN
+# class AGCN(nn.Module):
+#     def __init__(self, in_channels, num_class, graph_args, dropout):
+#         super().__init__()
+
+#         # load graph
+#         self.graph = Graph(**graph_args) # graph.py의 Graph 클래스에서 정의한 그래프 구조를 불러옴
+#         A_np=self.graph.A #numpy array
+#         # A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
+#         # self.register_buffer('A', A)
+
+#         # build networks
+#         spatial_kernel_size = A_np.shape[0]
+#         temporal_kernel_size = 9
+#         kernel_size = (temporal_kernel_size, spatial_kernel_size)
+#         self.data_bn = nn.BatchNorm1d(in_channels * A_np.shape[1])
+#         self.st_gcn_networks = nn.ModuleList((
+#         st_gcn(in_channels, 64,  kernel_size, 1,A=A_np, residual=False, dropout=0),
+#         st_gcn(64,  64,  kernel_size, 1,A_np, dropout),
+#         st_gcn(64,  64,  kernel_size, 1,A_np, dropout),
+#         st_gcn(64,  128,  kernel_size, 2,A_np, dropout), # 200→100
+#         st_gcn(128,  128, kernel_size, 1, A_np,dropout), 
+#         st_gcn(128,  128, kernel_size, 1,A_np, dropout), 
+#         st_gcn(128, 256, kernel_size, 2,A_np, dropout), # 100→50
+#         st_gcn(256, 256, kernel_size, 1, A_np,dropout), 
+#     ))
+        
+#         # fcn for prediction
+#         self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
+
+#     def forward(self, x_IMU):
+
+#         # data normalization
+#         B,T,D = x_IMU.shape
+#         x=x_IMU.view(B,T,10,3)
+#         x=x.permute(0,3,1,2).contiguous() 
+#         x=x.unsqueeze(-1) # (B,3,200,10,1) 형태로 변환하여 ST-GCN 입력에 맞춤
+#         N, C, T, V, M = x.size()
+#         x = x.permute(0, 4, 3, 1, 2).contiguous()
+#         x = x.view(N * M, V * C, T)
+#         x = self.data_bn(x)
+#         x = x.view(N, M, V, C, T)
+#         x = x.permute(0, 1, 3, 4, 2).contiguous()
+#         x = x.view(N * M, C, T, V)
+
+#         # forwad
+#         for gcn in self.st_gcn_networks:
+#             x= gcn(x)
+
+#         # global pooling
+#         x = F.avg_pool2d(x, x.size()[2:])
+#         x = x.view(N, M, -1, 1, 1).mean(dim=1)
+
+#         # prediction
+#         x = self.fcn(x)
+#         x = x.view(x.size(0), -1)
+
+#         return x
+    
+
+
+#     def extract_feature(self, x_IMU):
+
+#         # data normalization
+#         B, T, D = x_IMU.shape
+#         x = x_IMU.view(B, T, 10, 3)
+#         x = x.permute(0, 3, 1, 2).contiguous()
+#         x = x.unsqueeze(-1) # (B,3,200,10,1) 형태로 변환하여 ST-GCN 입력에 맞춤
+#         N, C, T, V, M = x.size()
+#         x = x.permute(0, 4, 3, 1, 2).contiguous()
+#         x = x.view(N * M, V * C, T)
+#         x = self.data_bn(x)
+#         x = x.view(N, M, V, C, T)
+#         x = x.permute(0, 1, 3, 4, 2).contiguous()
+#         x = x.view(N * M, C, T, V)
+
+#         # forwad
+#         for gcn in self.st_gcn_networks:
+#             x= gcn(x)
+
+#         _, c, t, v = x.size()
+#         feature = x.view(N, M, c, t, v).permute(0, 2, 3, 4, 1)
+
+#         # prediction
+#         x = self.fcn(x)
+#         output = x.view(N, M, -1, t, v).permute(0, 2, 3, 4, 1)
+
+#         return output, feature
+    
+    
+# class Zero(nn.Module):
+#     def forward(self, x):
+#         return 0
+
+# class st_gcn(nn.Module):
+
+#     def __init__(self,
+#                  in_channels,
+#                  out_channels,
+#                  kernel_size,
+#                  stride=1, A=None,
+#                  dropout=0.2,
+#                  residual=True):
+#         super().__init__()
+
+#         assert len(kernel_size) == 2
+#         assert kernel_size[0] % 2 == 1
+#         padding = ((kernel_size[0] - 1) // 2, 0)
+
+#         self.gcn = unit_gcn(in_channels, out_channels,
+#                                          A)
+
+#         self.tcn = nn.Sequential(
+#             nn.BatchNorm2d(out_channels),
+#             nn.ReLU(inplace=True),
+#             nn.Conv2d(
+#                 out_channels,
+#                 out_channels,
+#                 (kernel_size[0], 1),
+#                 (stride, 1),
+#                 padding,
+#             ),
+#             nn.BatchNorm2d(out_channels),
+#             nn.Dropout(dropout, inplace=True),
+#         )
+
+
+#         if not residual:
+#             self.residual = Zero()
+
+#         elif (in_channels == out_channels) and (stride == 1):
+#             self.residual = nn.Identity()
+
+#         else:
+#             self.residual = nn.Sequential(
+#                 nn.Conv2d(
+#                     in_channels,
+#                     out_channels,
+#                     kernel_size=1,
+#                     stride=(stride, 1)),
+#                 nn.BatchNorm2d(out_channels),
+#             )
+
+#         self.relu = nn.ReLU(inplace=True)
+
+#     def forward(self, x):
+
+#         res = self.residual(x)
+#         x = self.gcn(x) #AGCN은 A를 입력으로 받지 않음, 내부에서 처리함 
+#         x = self.tcn(x) + res
+
+#         return self.relu(x)
+    
+
+# #inception 넣기 
+# class IMU_STGCNINCEPTION(nn.Module):
+#     def __init__(self, in_channels, num_class, graph_args,
+#                  edge_importance_weighting, dropout):
+#         super().__init__()
+
+#         # load graph
+#         self.graph = Graph(**graph_args) # graph.py의 Graph 클래스에서 정의한 그래프 구조를 불러옴
+#         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
+#         self.register_buffer('A', A)
+
+#         # build networks
+#         spatial_kernel_size = A.size(0)
+#         temporal_kernel_size = 9
+#         kernel_size = (temporal_kernel_size, spatial_kernel_size)
+#         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
+#         self.st_gcn_networks = nn.ModuleList((
+#         st_gcn(in_channels, 64,  kernel_size, 1, residual=False, dropout=0),
+#         st_gcn(64,  64,  kernel_size, 1, dropout),
+#         st_gcn(64,  64,  kernel_size, 1, dropout),
+#         st_gcn(64,  64,  kernel_size, 1, dropout),
+#         st_gcn(64,  128, kernel_size, 2, dropout),  # 200→100
+#         st_gcn(128, 128, kernel_size, 1, dropout),
+#         st_gcn(128, 128, kernel_size, 1, dropout),
+#         st_gcn(128, 256, kernel_size, 2, dropout),  # 100→50
+#         st_gcn(256, 256, kernel_size, 1, dropout),
+#         st_gcn(256, 256, kernel_size, 1, dropout),
+#     ))
+
+#         # initialize parameters for edge importance weighting
+#         if edge_importance_weighting:
+#             self.edge_importance = nn.ParameterList([
+#                 nn.Parameter(torch.ones(self.A.size()))
+#                 for i in self.st_gcn_networks
+#             ])
+#         else:
+#             self.edge_importance = [1] * len(self.st_gcn_networks)
+
+#         # fcn for prediction
+#         self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
+
+#     def forward(self, x_IMU):
+
+#         # data normalization
+#         B,T,D = x_IMU.shape
+#         x=x_IMU.view(B,T,10,3)
+#         x=x.permute(0,3,1,2).contiguous() 
+#         x=x.unsqueeze(-1) # (B,3,200,10,1) 형태로 변환하여 ST-GCN 입력에 맞춤
+#         N, C, T, V, M = x.size()
+#         x = x.permute(0, 4, 3, 1, 2).contiguous()
+#         x = x.view(N * M, V * C, T)
+#         x = self.data_bn(x)
+#         x = x.view(N, M, V, C, T)
+#         x = x.permute(0, 1, 3, 4, 2).contiguous()
+#         x = x.view(N * M, C, T, V)
+
+#         # forwad
+#         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
+#             x, _ = gcn(x, self.A * importance)
+
+#         # global pooling
+#         x = F.avg_pool2d(x, x.size()[2:])
+#         x = x.view(N, M, -1, 1, 1).mean(dim=1)
+
+#         # prediction
+#         x = self.fcn(x)
+#         x = x.view(x.size(0), -1)
+
+#         return x
+    
+
+
+#     def extract_feature(self, x_IMU):
+
+#         # data normalization
+#         B, T, D = x_IMU.shape
+#         x = x_IMU.view(B, T, 10, 3)
+#         x = x.permute(0, 3, 1, 2).contiguous()
+#         x = x.unsqueeze(-1) # (B,3,200,10,1) 형태로 변환하여 ST-GCN 입력에 맞춤
+#         N, C, T, V, M = x.size()
+#         x = x.permute(0, 4, 3, 1, 2).contiguous()
+#         x = x.view(N * M, V * C, T)
+#         x = self.data_bn(x)
+#         x = x.view(N, M, V, C, T)
+#         x = x.permute(0, 1, 3, 4, 2).contiguous()
+#         x = x.view(N * M, C, T, V)
+
+#         # forwad
+#         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
+#             x, _ = gcn(x, self.A * importance)
+
+#         _, c, t, v = x.size()
+#         feature = x.view(N, M, c, t, v).permute(0, 2, 3, 4, 1)
+
+#         # prediction
+#         x = self.fcn(x)
+#         output = x.view(N, M, -1, t, v).permute(0, 2, 3, 4, 1)
+
+#         return output, feature
+    
+# class InceptionTCN(nn.Module):
+#     def __init__(self, in_channels, out_channels, stride=1, dropout=0.2):
+#         super().__init__()
+#         mid = out_channels // 2  # 2개 branch니까 //2
+        
+#         self.branch1 = nn.Sequential(
+#             nn.Conv2d(in_channels, mid, (5,1), (stride,1), (2,0)), #kernel size =(5,1), (Stride,1), padding=(2,0)
+#             nn.BatchNorm2d(mid), nn.ReLU(inplace=True)
+#         )
+#         self.branch2 = nn.Sequential(
+#             nn.Conv2d(in_channels, mid, (7,1), (stride,1), (3,0)), #kernel size =(7,1), (Stride,1), padding=(3,0)
+#             nn.BatchNorm2d(mid), nn.ReLU(inplace=True)
+#         )
+        
+#         self.bn = nn.BatchNorm2d(out_channels)
+#         self.dropout = nn.Dropout(dropout, inplace=False)
+
+#     def forward(self, x):
+#         x = torch.cat([self.branch1(x), self.branch2(x)], dim=1)
+#         return self.dropout(self.bn(x))
+    
+# class Zero(nn.Module):
+#     def forward(self, x):
+#         return 0
+
+# class st_gcn(nn.Module):
+
+#     def __init__(self,
+#                  in_channels,
+#                  out_channels,
+#                  kernel_size,
+#                  stride=1,
+#                  dropout=0.2,
+#                  residual=True):
+#         super().__init__()
+
+#         assert len(kernel_size) == 2
+#         assert kernel_size[0] % 2 == 1
+#         padding = ((kernel_size[0] - 1) // 2, 0)
+
+#         self.gcn = ConvTemporalGraphical(in_channels, out_channels,
+#                                          kernel_size[1])
+
+#         self.tcn = InceptionTCN(out_channels, out_channels, stride, dropout)
+
+#         if not residual:
+#             self.residual = Zero()
+
+#         elif (in_channels == out_channels) and (stride == 1):
+#             self.residual = nn.Identity()
+
+#         else:
+#             self.residual = nn.Sequential(
+#                 nn.Conv2d(
+#                     in_channels,
+#                     out_channels,
+#                     kernel_size=1,
+#                     stride=(stride, 1)),
+#                 nn.BatchNorm2d(out_channels),
+#             )
+
+#         self.relu = nn.ReLU(inplace=True)
+
+#     def forward(self, x, A):
+
+#         res = self.residual(x)
+#         x, A = self.gcn(x, A)
+#         x = self.tcn(x) + res
+
+#         return self.relu(x), A
 # ----------------------------
 # PreNorm Transformer blocks (원본 그대로 사용)
 # ----------------------------
@@ -254,7 +591,7 @@ class IMU_BiLSTM(nn.Module):
     입력: x_IMU (B, 200, 15)
     처리: Conv1d 3단 -> (B, 64, 25) -> BiLSTM(seq=25, feat=64) -> GAP -> FC
     """
-    def __init__(self, num_classes, nCh=30, hidden_dim=128, num_layers=1, gap_dropout=0.5):
+    def __init__(self, num_classes, nCh=15, hidden_dim=128, num_layers=1, gap_dropout=0.5):
         super().__init__()
 
         self.IMU_conv1 = nn.Sequential(

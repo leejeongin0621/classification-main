@@ -15,19 +15,29 @@ class Graph():
 
     def __str__(self):
         return self.A
-
+    
     def get_edge(self):
-            self.num_node = 10
-            self_link = [(i, i) for i in range(self.num_node)]
-            neighbor_link = [(0,1), (0,6), (0,5),
-                             (1,2), (1,3), (1,6),
-                             (2,3), (2,4),
-                             (3,4), (3,6), (3,8),
-                             (4,8), (4,9),
-                             (5,6), (5,7),
-                             (6,7),
-                             (8,9)]
-            self.edge = self_link + neighbor_link
+        self.num_node = 10
+        self_link = [(i, i) for i in range(self.num_node)]
+        neighbor_link = [(0,1), (0,6), (0,5),
+                            (1,2), (1,3), (1,6),
+                            (2,3), (2,4),
+                            (3,4), (3,6), (3,8), (3,7),
+                            (4,8), (4,9),
+                            (5,6), (5,7),
+                            (6,7), 
+                            (7,8), (7,9),
+                            (8,9)]
+        self.edge = self_link + neighbor_link
+
+    # def get_edge(self):
+    #         self.num_node = 5
+    #         self_link = [(i, i) for i in range(self.num_node)]
+    #         neighbor_link = [(0,1), (0,2), (0,3), (0,4),
+    #                         (1,2), (1,3), (1,4),
+    #                         (2,3), (2,4),
+    #                         (3,4)]
+    #         self.edge = self_link + neighbor_link
 
     def get_adjacency(self):
         valid_hop = range(0, self.max_hop + 1, self.dilation)
@@ -57,11 +67,11 @@ def get_hop_distance(num_node, edge, max_hop):
 
 
 def normalize_digraph(A):
-    Dl = np.sum(A, 0)
+    Dl = np.sum(A, 0) #열 방향 합
     num_node = A.shape[0]
     Dn = np.zeros((num_node, num_node))
     for i in range(num_node):
         if Dl[i] > 0:
-            Dn[i, i] = Dl[i]**(-1)
-    AD = np.dot(A, Dn)
-    return AD
+            Dn[i, i] = Dl[i]**(-0.5) # D^-1/2
+    DAD = np.dot(np.dot(Dn,A), Dn) # D^-1/2 * A * D^-1/2
+    return DAD

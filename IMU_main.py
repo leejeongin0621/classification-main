@@ -15,12 +15,13 @@ from datetime import datetime
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
+
 # =========================
 # Settings
 # =========================
-subject_list = ['250805_KDY','250814_JCM','250820_LTG' ]
+subject_list = ['250805_KDY','250731_LGE','250806_LJI','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB']
 #left='250804_KTS','250805_SMC','250811_LPR','250811_JHS','250812_HHJ','250813_YMS','250814_CYJ','250819_CYK','250822_KTH', '250827_HJH'
-#right='250731_LGE','250805_KDY','250806_LJI','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB'
+#right='250805_KDY','250731_LGE','250806_LJI','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB'
 num_subject = len(subject_list)
 num_session = 5
 
@@ -43,10 +44,11 @@ model_path = os.path.join(path_sub_proj, 'models')
 os.makedirs(save_path, exist_ok=True) #Create directory if it does not exist
 os.makedirs(model_path, exist_ok=True)
 
-max_fine_epochs = 400
+max_fine_epochs = 250
 min_fine_epochs = 200
 model_list = [1] # 1: IMU_BiLSTM, 2: IMU_conso_processing_Transformer 3: IMU_Transformer #ST-GCN 모델 
-#4: IMU_STGCN (edge importance weighting x) 5: IMU_STGCN (no edge importance weighting o) #6 : IMU_STGCN (layer 6)
+#4: IMU_STGCN (edge importance weighting x) 5: IMU_STGCN (no edge importance weighting o) #6 : IMU_STGCN (layer 6) #7 : IMU_STGCN (layer 8) 
+#8 : IMU_STGCN (layer 8),kernel 9
 
 # =========================
 # Data Load (IMU only)
@@ -59,16 +61,31 @@ IMU_data_patient, IMU_label_patient = LoadIMU_EPO_simple(load_path, subject_list
 # =========================
 for model_num in model_list:
 
-    seed = 2023
-    os.environ['PYTHONHASHSEED'] = str(seed) #fixed hash seed 
-    random.seed(seed)  #Python  
-    np.random.seed(seed) #Numpy
-    torch.manual_seed(seed) #CPU
-    torch.cuda.manual_seed(seed) #GPU
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False 
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.enabled = False
+    # seed = 2023
+    # os.environ['PYTHONHASHSEED'] = str(seed) #fixed hash seed 
+    # random.seed(seed)  #Python  
+    # np.random.seed(seed) #Numpy
+    # torch.manual_seed(seed) #CPU
+    # torch.cuda.manual_seed(seed) #GPU
+    # torch.cuda.manual_seed_all(seed)
+    # torch.backends.cudnn.benchmark = False 
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.enabled = False
+    
+    subject_id_map = {
+        '250805_KDY': 1,
+        '250731_LGE': 2,
+        '250806_LJI': 3,
+        '250812_WDY': 4,
+        '250814_JCM': 5,
+        '250818_ICY': 6,
+        '250819_PYH': 7,
+        '250820_LTG': 8,
+        '250822_JSH': 9,
+        '250825_JDB': 10,
+    }
+
+    base_seed = 2023
 
     print(f"\n=========== IMU model_{model_num} ==============\n")
 
@@ -83,6 +100,11 @@ for model_num in model_list:
     fine_loss.fill(np.nan) #Fill the array with NaN for epochs not reached during training
     fine_acc.fill(np.nan)
 
+    best_acc_result = np.empty((num_subject, num_session))
+    best_loss_result = np.empty((num_subject, num_session))
+    best_acc_result.fill(np.nan)
+    best_loss_result.fill(np.nan)
+
     ground_truth = np.empty((num_subject, num_session, (num_session-1)*num_class))
     prediction_result = np.empty((num_subject, num_session, (num_session-1)*num_class, num_class))
     ground_truth.fill(np.nan)
@@ -95,6 +117,17 @@ for model_num in model_list:
         sessions = np.arange(num_session)
 
         for fold in sessions:
+
+            seed = base_seed + subject_id_map[s_name] * 100 + int(fold)
+
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.enabled = False
             print(f"- fold {fold} -")
 
             test_session  = np.array([fold])
@@ -120,14 +153,16 @@ for model_num in model_list:
             val_loader = DataLoader(val_dataset, batch_size=50, shuffle=True)
 
             # -------- Load IMU model --------
-            model = torch.load(os.path.join(model_path, f"Model_6.pt"),
+            model = torch.load(os.path.join(model_path, f"Model_21.pt"),
                                map_location=device,
+
+
                                weights_only=False)  # PyTorch 2.6 대응
 
             model.to(device)
 
             criterion = nn.CrossEntropyLoss()
-            optimizer = optim.Adam(model.parameters(), lr=0.0005) #3e-4,4e-4 not good
+            optimizer = optim.Adam(model.parameters(), lr=0.001) #3e-4,4e-4 not good 원래 0.0005 ,0.0005, weight_decay=1e-4
             #stepLR scheduler
             # scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
             #                                             step_size=50,   # 50 epoch마다
@@ -138,6 +173,13 @@ for model_num in model_list:
 
             train_losses, val_losses = [], []
             train_accs, val_accs = [], []
+
+            best_model_path = os.path.join(model_path, f"best_model_{s_name}_fold_{fold}.pth")
+            best_val_acc = -1
+            best_epoch = -1
+            counter = 0
+            best_val_loss= 0
+            patience=10
 
             # -------- Training --------
             for epoch in tqdm(
@@ -170,16 +212,48 @@ for model_num in model_list:
                 model.eval()
                 val_loss, val_correct, val_total = 0.0, 0, 0
 
-                with torch.no_grad():
-                    for X_IMU, y in val_loader:
-                        X_IMU, y = X_IMU.to(device), y.to(device)
-                        outputs = model(X_IMU)
-                        loss = criterion(outputs, y)
+                model.eval()
 
-                        val_loss += loss.item() * X_IMU.size(0)
-                        _, pred = outputs.max(1)
-                        val_correct += pred.eq(y).sum().item()
-                        val_total += y.size(0)
+                node_importance_total = torch.zeros(10, device=device)
+
+                for X_IMU, y in val_loader:
+                    X_IMU, y = X_IMU.to(device), y.to(device)
+
+                    X_IMU.requires_grad_(True)
+
+                    outputs = model(X_IMU)
+                    loss = criterion(outputs, y)
+
+                    val_loss += loss.item() * X_IMU.size(0)
+                    _, pred = outputs.max(1)
+                    val_correct += pred.eq(y).sum().item()
+                    val_total += y.size(0)
+
+                    target = outputs[torch.arange(len(pred), device=device), pred].mean()
+
+                    model.zero_grad()
+                    target.backward()
+
+                    grad = X_IMU.grad  # (B, T, 30)
+                    grad = grad.view(grad.size(0), grad.size(1), 10, 3)  # (B, T, V, C)
+
+                    importance = grad.abs().mean(dim=(0, 1, 3))  # (10,)
+                    node_importance_total += importance.detach()
+
+                    X_IMU.grad = None
+
+                node_importance = node_importance_total / len(val_loader)
+
+                # with torch.no_grad():
+                #     for X_IMU, y in val_loader:
+                #         X_IMU, y = X_IMU.to(device), y.to(device)
+                #         outputs = model(X_IMU)
+                #         loss = criterion(outputs, y)
+
+                #         val_loss += loss.item() * X_IMU.size(0)
+                #         _, pred = outputs.max(1)
+                #         val_correct += pred.eq(y).sum().item()
+                #         val_total += y.size(0)
 
                 val_losses.append(val_loss / val_total)
                 val_accs.append(val_correct / val_total)
@@ -192,11 +266,34 @@ for model_num in model_list:
                 writer.add_scalar(f"IMU/{s_name}/fold{fold}/train_acc",  train_accs[-1],  global_step)
                 writer.add_scalar(f"IMU/{s_name}/fold{fold}/val_loss",   val_losses[-1],   global_step)
                 writer.add_scalar(f"IMU/{s_name}/fold{fold}/val_acc",    val_accs[-1],    global_step)   
-                #writer.add_scalar(f"IMU/{s_name}/fold{fold}/lr", current_lr, global_step)            
+                #writer.add_scalar(f"IMU/{s_name}/fold{fold}/lr", current_lr, global_step)
+                
 
-                if epoch >= min_fine_epochs - 1 and train_accs[-1] >= 0.99:
-                    print(f"train early finished, epoch : {epoch}")
-                    break
+
+                current_val_acc = val_accs[-1]
+                current_val_loss = val_losses[-1]
+
+                improved = current_val_acc > best_val_acc
+
+                if improved:
+                    best_val_acc = current_val_acc
+                    best_val_loss = current_val_loss
+                    best_epoch = epoch
+                    torch.save(model.state_dict(), best_model_path)
+
+                if epoch >= min_fine_epochs - 1:
+                    if improved:
+                        counter = 0
+                    else:
+                        counter += 1
+
+                    if counter >= patience:
+                        print(f"early stop at epoch {epoch}, best epoch was {best_epoch}")
+                        break 
+
+                # if epoch >= min_fine_epochs - 1 and train_accs[-1] >= 0.99:
+                #     print(f"train early finished, epoch : {epoch}")
+                #     break
 
             # ---- Save curves ----
             L = len(train_accs)
@@ -205,32 +302,88 @@ for model_num in model_list:
             fine_loss[s, fold, 0, :L] = np.array(train_losses)
             fine_loss[s, fold, 1, :L] = np.array(val_losses)
 
-            print(f"acc : train - {train_accs[-1]} / val - {val_accs[-1]} ")
+            best_acc_result[s, fold] = best_val_acc
+            best_loss_result[s, fold] = best_val_loss
+
+            print(f"acc : train - {train_accs[-1]} / val - {best_val_acc} ")
             
             # ---- Save edge importance heatmap  ----
             # if model_num == 5 and hasattr(model, 'edge_importance'):
             import matplotlib.pyplot as plt
             import seaborn as sns
 
-            for i, imp in enumerate(model.edge_importance):
-                imp_np = imp.detach().cpu().numpy().sum(axis=0)  # (10, 10)
-                
-                plt.figure()
-                sns.heatmap(imp_np, annot=True, fmt='.2f',
-                            xticklabels=[f'N{j}' for j in range(10)],
-                            yticklabels=[f'N{j}' for j in range(10)])
-                plt.title(f"{s_name} fold {fold} layer {i}")
-                plt.savefig(os.path.join(save_path, f"edge_{s_name}_fold{fold}_layer{i}.png")) 
-                plt.close()
+            A_np = model.A.detach().cpu().numpy()                 # (K, 10, 10)
+            imp_last = model.edge_importance[-1].detach().cpu().numpy()   # (K, 10, 10)
+
+            # 1) 실제로 모델이 쓰는 그래프
+            effective = (A_np * imp_last).mean(axis=0)   # (10, 10)
+
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(effective, annot=True, fmt='.3f',
+                        xticklabels=[f'N{j}' for j in range(10)],
+                        yticklabels=[f'N{j}' for j in range(10)])
+            plt.title(f"Effective Graph - {s_name} fold {fold}")
+            plt.savefig(os.path.join(save_path, f"edge_effective_{s_name}_fold{fold}.png"))
+            plt.close()
+
+            # 2) raw importance 자체
+            imp_mean = imp_last.mean(axis=0)   # (10, 10)
+
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(imp_mean, annot=True, fmt='.3f',
+                        xticklabels=[f'N{j}' for j in range(10)],
+                        yticklabels=[f'N{j}' for j in range(10)])
+            plt.title(f"Raw Importance - {s_name} fold {fold}")
+            plt.savefig(os.path.join(save_path, f"edge_raw_{s_name}_fold{fold}.png"))
+            plt.close()
+
+            node_imp_np = node_importance.detach().cpu().numpy().reshape(1, -1)   # (1, 10)
+
+            plt.figure(figsize=(10, 2))
+            sns.heatmap(node_imp_np, annot=True, fmt='.4f', cmap='YlOrRd',
+                        xticklabels=[f'N{j}' for j in range(10)],
+                        yticklabels=['Importance'])
+            plt.title(f"Node Importance - {s_name} fold {fold}")
+            plt.savefig(os.path.join(save_path, f"node_importance_{s_name}_fold{fold}.png"))
+            plt.close()
 
             # ---- Save model ----
-            torch.save(
-                model.state_dict(),
-                os.path.join(model_path,
-                             f"IMU_Model_1_finetuned_sub_{s_name}_fold_{fold}.pt")
-            )
+            model.load_state_dict(torch.load(best_model_path, map_location=device))
 
-            # ---- Save prediction ----
+            # ---- Word importance  ----
+            model.eval()
+            word_importance = np.zeros((num_class, 10))
+            word_count = np.zeros(num_class)
+
+            inputs = torch.tensor(X_test, dtype=torch.float32).to(device)
+            inputs.requires_grad_(True)
+            outputs = model(inputs)
+
+            for class_idx in range(num_class):
+                mask = (torch.tensor(y_test) == class_idx)
+                if mask.sum() == 0:
+                    continue
+                
+                if inputs.grad is not None:
+                    inputs.grad.zero_()
+                
+                target = outputs[mask, class_idx].mean()
+                model.zero_grad()
+                target.backward(retain_graph=True)
+                
+                grad = inputs.grad[mask]
+                grad = grad.view(-1, num_time_IMU, 10, 3).abs().mean(dim=(0, 1, 3))
+                word_importance[class_idx] += grad.cpu().detach().numpy()
+                word_count[class_idx] += 1
+            
+            for c in range(num_class):
+                if word_count[c] > 0:
+                    word_importance[c] /= word_count[c]
+
+
+            np.save(os.path.join(save_path, f"word_importance_{s_name}_fold{fold}.npy"), word_importance)
+
+            # # ---- Save prediction ----
             ground_truth[s, fold, :len(y_test)] = y_test
 
             with torch.no_grad():
@@ -250,29 +403,29 @@ for model_num in model_list:
     # =========================
     # 5-Fold Summary
     # =========================
-    valid_lens = np.sum(~np.isnan(fine_acc), axis=-1)
-    last_indices = valid_lens - 1
-    result = np.take_along_axis(fine_acc,
-                                last_indices[..., np.newaxis],
-                                axis=-1).squeeze(-1) #extract final accuracy of each fold (last trained epoch)
+    # valid_lens = np.sum(~np.isnan(fine_acc), axis=-1)
+    # last_indices = valid_lens - 1
+    # result = np.take_along_axis(fine_acc,
+    #                             last_indices[..., np.newaxis],
+    #                             axis=-1).squeeze(-1) #extract final accuracy of each fold (last trained epoch)
 
-    result_mean = np.mean(result, axis=1)
-    result_std  = np.std(result, axis=1)
+    result_mean = np.mean(best_acc_result, axis=1)
+    result_std  = np.std(best_acc_result, axis=1)
 
     total_mean = np.mean(result_mean, axis=0)
     total_std  = np.std(result_mean, axis=0)
 
-    print(f"\n======= IMU model_1 Average Acc =========")
+    print(f"\n======= IMU model_14_average Acc =========")
     for s_idx, sname in enumerate(subject_list):
-        print(f"{sname}: {result_mean[s_idx,1]} (±{result_std[s_idx,1]})")
+        print(f"{sname}: {result_mean[s_idx]} (±{result_std[s_idx]})")
 
-    print(f"\nTotal Average Acc : {total_mean[1]} (±{total_std[1]})")
+    print(f"\nTotal Average Acc : {total_mean} (±{total_std})")
 
     # =========================
     # Save .mat
     # =========================
     io.savemat(
-        os.path.join(save_path, f"model_1_result.mat"),
+        os.path.join(save_path, f"model_14_result.mat"),
         {
             'fine_loss': fine_loss,
             'fine_acc': fine_acc,
