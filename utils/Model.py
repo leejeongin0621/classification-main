@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.nn.modules.transformer import _get_clones
 from utils.tgcn import ConvTemporalGraphical, DynamicGraphConv,unit_gcn
 from utils.graph import Graph
+import numpy as np
 
 
 #----------------------------
@@ -19,7 +20,22 @@ class IMU_STGCN(nn.Module):
         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
         self.register_buffer('A', A)
 
-        # build networks
+        #build networks
+        spatial_kernel_size = A.size(0)
+        temporal_kernel_size = 11
+        kernel_size = (temporal_kernel_size, spatial_kernel_size)
+        self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
+        self.st_gcn_networks = nn.ModuleList((
+        st_gcn(in_channels, 64,  kernel_size, 1, residual=False, dropout=0),
+        st_gcn(64,  64,  kernel_size, 1, dropout),
+        st_gcn(64,  64,  kernel_size, 1, dropout),
+        st_gcn(64,  128,  kernel_size, 2, dropout), # 200→100
+        st_gcn(128,  128, kernel_size, 1, dropout), 
+        st_gcn(128,  128, kernel_size, 1, dropout), 
+        st_gcn(128, 256, kernel_size, 2, dropout), # 100→50
+
+    ))
+        
     #     spatial_kernel_size = A.size(0)
     #     temporal_kernel_size = 9
     #     kernel_size = (temporal_kernel_size, spatial_kernel_size)
@@ -34,16 +50,6 @@ class IMU_STGCN(nn.Module):
     #     st_gcn(128, 256, kernel_size, 2, dropout), # 100→50
     #     st_gcn(256, 256, kernel_size, 1, dropout),  
     # ))
-        
-        spatial_kernel_size = A.size(0)
-        temporal_kernel_size = 9
-        kernel_size = (temporal_kernel_size, spatial_kernel_size)
-        self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
-        self.st_gcn_networks = nn.ModuleList((
-        st_gcn(in_channels, 64,  kernel_size, 1, residual=False, dropout=0),
-        st_gcn(64,  128,  kernel_size, 2, dropout), # 200→100
-        st_gcn(128, 256, kernel_size, 2, dropout), # 100→50
-    ))
 
         # initialize parameters for edge importance weighting
         if edge_importance_weighting:
@@ -57,13 +63,34 @@ class IMU_STGCN(nn.Module):
         # fcn for prediction
         self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
 
+    # #top 20 edge 를 선택해서 binary adjacency matrix로 만든다
+    # def make_topk_adj(self, A_corr, k=20):
+    #     V = A_corr.size(0)
+    #     A_bin = torch.zeros_like(A_corr)
+
+    #     idx = torch.triu_indices(V, V, offset=1, device=A_corr.device)
+    #     vals = A_corr[idx[0], idx[1]]
+
+    #     k = min(k, vals.numel())
+    #     topk_idx = torch.topk(vals, k=k).indices
+
+    #     sel_i = idx[0][topk_idx]
+    #     sel_j = idx[1][topk_idx]
+
+    #     A_bin[sel_i, sel_j] = 1.0
+    #     A_bin[sel_j, sel_i] = 1.0
+    #     A_bin.fill_diagonal_(1.0)
+
+    #     return A_bin
+
     def forward(self, x_IMU):
 
         # data normalization
-        B,T,D = x_IMU.shape
-        x=x_IMU.view(B,T,10,3) #10개일때와 5개일때 변경해야함
-        x=x.permute(0,3,1,2).contiguous() 
-        x=x.unsqueeze(-1) # (B,3,200,10,1) 형태로 변환하여 ST-GCN 입력에 맞춤
+        B, T, D = x_IMU.shape
+        x = x_IMU.view(B, T, 10, 3)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x.unsqueeze(-1)
+
         N, C, T, V, M = x.size()
         x = x.permute(0, 4, 3, 1, 2).contiguous()
         x = x.view(N * M, V * C, T)
@@ -72,7 +99,22 @@ class IMU_STGCN(nn.Module):
         x = x.permute(0, 1, 3, 4, 2).contiguous()
         x = x.view(N * M, C, T, V)
 
-        # forwad
+        # if A_corr is None:
+        #     A_used = self.A
+        # else:
+        #     if isinstance(A_corr, np.ndarray):
+        #         A_corr = torch.tensor(A_corr, dtype=torch.float32, device=x.device)
+        #     else:
+        #         A_corr = A_corr.to(x.device).float()
+
+        #     A_corr = A_corr.clone()
+        #     A_corr = self.make_topk_adj(A_corr, k=20)
+
+        #     A_used = self.A * A_corr
+
+        # self.A_used_last = A_used
+
+        # forward
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
             x, _ = gcn(x, self.A * importance)
 
@@ -85,8 +127,6 @@ class IMU_STGCN(nn.Module):
         x = x.view(x.size(0), -1)
 
         return x
-    
-
 
     def extract_feature(self, x_IMU):
 
@@ -103,10 +143,22 @@ class IMU_STGCN(nn.Module):
         x = x.permute(0, 1, 3, 4, 2).contiguous()
         x = x.view(N * M, C, T, V)
 
+        # if A_corr is None:
+        #     A_used = self.A
+        # else:
+        #     if isinstance(A_corr, np.ndarray):
+        #         A_corr = torch.tensor(A_corr, dtype=torch.float32, device=x.device)
+        #     else:
+        #         A_corr = A_corr.to(x.device).float()
+
+        #     A_corr = A_corr.clone()
+        #     A_corr = self.make_topk_adj(A_corr, k=20)
+
+        #     A_used = self.A * A_corr  # (1, V, V)
+
         # forwad
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
             x, _ = gcn(x, self.A * importance)
-
         _, c, t, v = x.size()
         feature = x.view(N, M, c, t, v).permute(0, 2, 3, 4, 1)
 
@@ -591,7 +643,7 @@ class IMU_BiLSTM(nn.Module):
     입력: x_IMU (B, 200, 15)
     처리: Conv1d 3단 -> (B, 64, 25) -> BiLSTM(seq=25, feat=64) -> GAP -> FC
     """
-    def __init__(self, num_classes, nCh=15, hidden_dim=128, num_layers=1, gap_dropout=0.5):
+    def __init__(self, num_classes, nCh=30, hidden_dim=128, num_layers=1, gap_dropout=0.5):
         super().__init__()
 
         self.IMU_conv1 = nn.Sequential(

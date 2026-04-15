@@ -1,4 +1,6 @@
 #%%
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import torch
 from utils.Model import IMU_Transformer,IMU_BiLSTM,IMU_conso_processing_Transformer,IMU_STGCN
 from os import path
@@ -16,7 +18,7 @@ gap_dropout = 0.2
 nhead = 4
 nCh = 30
 IMU_conv_channel = 16
-conso_layers = 16
+conso_layers = 16 
 
 #num_layers = 16      # Transformer 인코더 레이어 수
 #hidden_dim = 64    # Transformer 모델의 숨겨진 차원 크기
@@ -80,8 +82,8 @@ model = IMU_STGCN(
 
 # 모델 전체 저장
 Path("models").mkdir(exist_ok=True)
-model_num = 20
-save_path = "./models/Model_20.pt"
+model_num = 37
+save_path = "./models/Model_37.pt"
 
 
 # 모델에 더미 입력 전달하여 정상 작동 확인
@@ -101,7 +103,7 @@ else:
 # 모델 전체 불러오기
 import torch
 
-model_num = 20
+model_num = 37
 
 save_path = "./models/Model_{}.pt".format(model_num)
 model_loaded = torch.load(save_path, weights_only=False, map_location=device)

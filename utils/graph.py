@@ -16,27 +16,47 @@ class Graph():
     def __str__(self):
         return self.A
     
-    def get_edge(self):
-        self.num_node = 10
-        self_link = [(i, i) for i in range(self.num_node)]
-        neighbor_link = [(0,1), (0,6), (0,5),
-                            (1,2), (1,3), (1,6),
-                            (2,3), (2,4),
-                            (3,4), (3,6), (3,8), (3,7),
-                            (4,8), (4,9),
-                            (5,6), (5,7),
-                            (6,7), 
-                            (7,8), (7,9),
-                            (8,9)]
-        self.edge = self_link + neighbor_link
+    # def get_edge(self):
+    #     self.num_node = 10
+    #     self_link = [(i, i) for i in range(self.num_node)]
+    #     neighbor_link = [(0,1), (0,6), (0,5),
+    #                         (1,2), (1,3), (1,6),
+    #                         (2,3), (2,4),
+    #                         (3,4), (3,6), (3,8), (3,7),
+    #                         (4,8), (4,9),
+    #                         (5,6), (5,7),
+    #                         (6,7), 
+    #                         (7,8), (7,9),
+    #                         (8,9)]
+    #     self.edge = self_link + neighbor_link
 
     # def get_edge(self):
-    #         self.num_node = 5
+    #         self.num_node = 10
     #         self_link = [(i, i) for i in range(self.num_node)]
-    #         neighbor_link = [(0,1), (0,2), (0,3), (0,4),
-    #                         (1,2), (1,3), (1,4),
-    #                         (2,3), (2,4),
-    #                         (3,4)]
+    #         neighbor_link = [(8,9), (7,8), (6,8), (5,7),
+    #                         (2,3), (1,2), (7,9), (2,7),
+    #                         (3,4), (6,9), (6,7), (4,9),
+    #                         (4,9),(2,6), (2,9), (1,7),
+    #                         (2,8), (2,4), (2,5),(3,8),(0,9)]
+    #         self.edge = self_link + neighbor_link
+
+    def get_edge(self):
+            self.num_node = 10
+            self_link = [(i, i) for i in range(self.num_node)]
+            neighbor_link = [(4,7),(1,5),(3,9),(2,8),(5,7)
+                             ,(1,4),(0,6),(2,9),(3,7),(6,8)
+                             ,(0,5),(1,7),(4,9),(2,6),(3,8)
+                             ,(0,7),(5,9),(1,6),(4,8),(2,7)]
+            self.edge = self_link + neighbor_link
+
+    #fully connected graph
+    # def get_edge(self):
+    #         self.num_node = 10
+    #         self_link = [(i, i) for i in range(self.num_node)]
+    #         neighbor_link = []
+    #         for i in range(self.num_node):
+    #             for j in range(i + 1, self.num_node):
+    #                 neighbor_link.append((i, j))
     #         self.edge = self_link + neighbor_link
 
     def get_adjacency(self):
@@ -44,6 +64,7 @@ class Graph():
         adjacency = np.zeros((self.num_node, self.num_node))
         for hop in valid_hop:
             adjacency[self.hop_dis == hop] = 1
+        
         normalize_adjacency = normalize_digraph(adjacency)
 
         A = np.zeros((len(valid_hop), self.num_node, self.num_node))
