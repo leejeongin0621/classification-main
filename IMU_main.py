@@ -9,6 +9,9 @@ from scipy import io
 import random
 from tqdm import tqdm
 from correlation import make_sample_corr, make_word_avg_corr, make_word_corr_dict
+from utils.graph import Graph, make_laplacian_pe
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from torch.utils.tensorboard import SummaryWriter #TensorBoard for visualization
 from datetime import datetime
@@ -48,10 +51,7 @@ os.makedirs(model_path, exist_ok=True)
 
 max_fine_epochs = 250
 min_fine_epochs = 200
-model_list = [1] # 1: IMU_BiLSTM, 2: IMU_conso_processing_Transformer 3: IMU_Transformer #ST-GCN 모델 
-#4: IMU_STGCN (edge importance weighting x) 5: IMU_STGCN (no edge importance weighting o) #6 : IMU_STGCN (layer 6) #7 : IMU_STGCN (layer 8) 
-#8 : IMU_STGCN (layer 8),kernel 9
-
+model_list = [1] 
 # =========================
 # Data Load (IMU only)
 # =========================
@@ -74,6 +74,7 @@ for model_num in model_list:
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.enabled = False
     
+    #right
     subject_id_map = {
         '250805_KDY': 1,
         '250731_LGE': 2,
@@ -86,6 +87,20 @@ for model_num in model_list:
         '250822_JSH': 9,
         '250825_JDB': 10,
     }
+
+    # #left
+    # subject_id_map = {
+    #     '250804_KTS': 1,
+    #     '250805_SMC': 2,
+    #     '250811_LPR': 3,
+    #     '250811_JHS': 4,
+    #     '250812_HHJ': 5,
+    #     '250813_YMS': 6,
+    #     '250814_CYJ': 7,
+    #     '250819_CYK': 8,
+    #     '250822_KTH': 9,
+    #     '250827_HJH': 10,
+    # }
 
     base_seed = 2023
 
@@ -142,8 +157,9 @@ for model_num in model_list:
             X_test = IMU_data_patient[s, test_session].reshape(-1, num_time_IMU, num_channel_IMU)
             y_test = IMU_label_patient[s, test_session].reshape(-1)
 
-            word_corr_dict = make_word_corr_dict(X_train, y_train)
+            # word_corr_dict = make_word_corr_dict(X_train, y_train)   # subject_prior 안 쓰는 중
 
+            # -------- 30ch raw 그대로 사용 (magnitude 제거) --------
             train_dataset = TensorDataset(
                 torch.tensor(X_train, dtype=torch.float32),
                 torch.tensor(y_train, dtype=torch.long)
@@ -157,20 +173,13 @@ for model_num in model_list:
             val_loader = DataLoader(val_dataset, batch_size=50, shuffle=False)
 
             # -------- Load IMU model --------
-            model = torch.load(os.path.join(model_path, f"Model_37.pt"),
+            model = torch.load(os.path.join(model_path, f"Model_88.pt"),
                                map_location=device,weights_only=False)  # PyTorch 2.6 대응
 
             model.to(device)
 
             criterion = nn.CrossEntropyLoss()
-            optimizer = optim.Adam(model.parameters(), lr=0.001) #3e-4,4e-4 not good 원래 0.0005 ,0.0005, weight_decay=1e-4
-            #stepLR scheduler
-            # scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-            #                                             step_size=50,   # 50 epoch마다
-            #                                             gamma=0.85       # lr 절반
-            #                                             )
-            
-            # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,T_max=max_fine_epochs) -transformer-
+            optimizer = optim.Adam(model.parameters(), lr=0.001)
 
             train_losses, val_losses = [], []
             train_accs, val_accs = [], []
@@ -181,6 +190,7 @@ for model_num in model_list:
             counter = 0
             best_val_loss= 0
             patience=15
+            best_edge_importance = None
 
             # -------- Training --------
             for epoch in tqdm(
@@ -198,13 +208,13 @@ for model_num in model_list:
 
                     optimizer.zero_grad() #backpropagation
                     
-                    for i in range(X_IMU.size(0)):
-                        X_sample = X_IMU[i:i+1]  # (200, 30)
-                        y_sample = y[i:i+1]      # (1,)
-
-                        word_label = int(y_sample.item()) #단어마다 adjacency 만들기 
-                        A_corr_np = word_corr_dict[word_label]
-                        A_corr = torch.tensor(A_corr_np, dtype=torch.float32, device=device)
+                    # for i in range(X_IMU.size(0)):
+                    #     X_sample = X_IMU[i:i+1]  # (200, 30)
+                    #     y_sample = y[i:i+1]      # (1,)
+                    #
+                    #     word_label = int(y_sample.item()) #단어마다 adjacency 만들기
+                    #     A_corr_np = word_corr_dict[word_label]
+                    #     A_corr = torch.tensor(A_corr_np, dtype=torch.float32, device=device)
 
                     outputs = model(X_IMU)   # ✅ IMU only
                     loss = criterion(outputs, y)
@@ -231,10 +241,10 @@ for model_num in model_list:
 
                     X_IMU.requires_grad_(True)
 
-                    # 단어별 adjacency 만들기-test 셋으로만 
-                    x_np = X_IMU[0].detach().cpu().numpy()   # (200, 30)
-                    A_corr_np = make_sample_corr(x_np)
-                    A_corr = torch.tensor(A_corr_np, dtype=torch.float32, device=device)
+                    # # 단어별 adjacency 만들기-test 셋으로만
+                    # x_np = X_IMU[0].detach().cpu().numpy()   # (200, 30)
+                    # A_corr_np = make_sample_corr(x_np)
+                    # A_corr = torch.tensor(A_corr_np, dtype=torch.float32, device=device)
 
                     outputs= model(X_IMU)   # ✅ IMU only
                     loss = criterion(outputs, y)
@@ -248,8 +258,8 @@ for model_num in model_list:
                     model.zero_grad()
                     target.backward()
 
-                    grad = X_IMU.grad  # (B, T, 30)
-                    grad = grad.view(grad.size(0), grad.size(1), 10, 3)  # (B, T, V, C)
+                    grad = X_IMU.grad  # (B, T, 30) — raw only
+                    grad = grad.view(grad.size(0), grad.size(1), 10, 3)   # (B, T, V=10, C=3)
 
                     importance = grad.abs().mean(dim=(0, 1, 3))  # (10,)
                     node_importance_total += importance.detach()
@@ -271,7 +281,7 @@ for model_num in model_list:
 
                 val_losses.append(val_loss / val_total)
                 val_accs.append(val_correct / val_total)
-                #current_lr = optimizer.param_groups[0]["lr"]
+                current_lr = optimizer.param_groups[0]["lr"]
 
                 global_step = (s * num_session + fold) * max_fine_epochs + epoch
 
@@ -281,22 +291,22 @@ for model_num in model_list:
                 writer.add_scalar(f"IMU/{s_name}/fold{fold}/val_loss",   val_losses[-1],   global_step)
                 writer.add_scalar(f"IMU/{s_name}/fold{fold}/val_acc",    val_accs[-1],    global_step)   
 
-                # if hasattr(model, 'edge_importance'):
-                #     imp_last = model.edge_importance[-1].detach().cpu().numpy()  # (K, V, V) or (V, V)
+                if hasattr(model, 'edge_importance'):
+                    imp_last = model.edge_importance[-1].detach().cpu().numpy()  # (K, V, V) or (V, V)
 
-                #     # branch 평균 인데 난 없긴 함.. 
-                #     if imp_last.ndim == 3:
-                #         imp_last = imp_last.mean(axis=0)  # (V, V)
+                    # branch 평균 인데 난 없긴 함.. 
+                    if imp_last.ndim == 3:
+                        imp_last = imp_last.mean(axis=0)  # (V, V)
 
-                #     V = imp_last.shape[0]
+                    V = imp_last.shape[0]
 
-                #     for i in range(V):
-                #         for j in range(i + 1, V):   # 중복 제거 (undirected)
-                #             writer.add_scalar(
-                #                 f"EdgeCurve/{s_name}/fold{fold}/edge_{i}_{j}",
-                #                 float(imp_last[i, j]),
-                #                 epoch
-                #             )
+                    for i in range(V):
+                        for j in range(i + 1, V):   # 중복 제거 (undirected)
+                            writer.add_scalar(
+                                f"EdgeCurve/{s_name}/fold{fold}/edge_{i}_{j}",
+                                float(imp_last[i, j]),
+                                epoch
+                            )
                                 
 
 
@@ -310,6 +320,15 @@ for model_num in model_list:
                     best_val_loss = current_val_loss
                     best_epoch = epoch
                     torch.save(model.state_dict(), best_model_path)
+
+                    if hasattr(model, 'edge_importance'):
+                        imp_best = model.edge_importance[-1].detach().cpu().numpy()
+
+                        # (K, V, V)이면 K 평균
+                        if imp_best.ndim == 3:
+                            imp_best = imp_best.mean(axis=0)
+
+                        best_edge_importance = imp_best.copy()
 
                 if epoch >= min_fine_epochs - 1:
                     if improved:
@@ -333,14 +352,49 @@ for model_num in model_list:
 
             print(f"acc : train - {train_accs[-1]} / val - {best_val_acc} ")
             
-            # ---- Save edge importance heatmap  ----
-            # if model_num == 5 and hasattr(model, 'edge_importance'):
-            import matplotlib.pyplot as plt
-            import seaborn as sns
+            if best_edge_importance is not None:
+                heatmap_dir = os.path.join(save_path, "edge_heatmap_best")
+                os.makedirs(heatmap_dir, exist_ok=True)
 
-            # A_np = model.A.detach().cpu().numpy()                 # (K, 10, 10)
-            # imp_last = model.edge_importance[-1].detach().cpu().numpy()   # (K, 10, 10)
-        
+                edge_mat = best_edge_importance.copy()
+
+                # 대칭 그래프라면 보기 좋게 대각선 제외
+                np.fill_diagonal(edge_mat, np.nan)
+
+                plt.figure(figsize=(8, 7))
+
+                sns.heatmap(
+                    edge_mat,
+                    annot=True,
+                    fmt=".2f",
+                    cmap="viridis",
+                    square=True,
+                    linewidths=0.5,
+                    linecolor="white",
+                    cbar_kws={"label": "Edge Importance"},
+                    xticklabels=[f"N{i}" for i in range(edge_mat.shape[0])],
+                    yticklabels=[f"N{i}" for i in range(edge_mat.shape[0])]
+                )
+
+                plt.title(
+                    f"Best Edge Importance Heatmap\n"
+                    f"{s_name} | fold {fold} | epoch {best_epoch} | val acc {best_val_acc:.4f}",
+                    fontsize=12
+                )
+                plt.xlabel("Target Node")
+                plt.ylabel("Source Node")
+                plt.tight_layout()
+
+                save_fig_path = os.path.join(
+                    heatmap_dir,
+                    f"edge_best_{s_name}_fold{fold}_epoch{best_epoch}_acc{best_val_acc:.4f}.png"
+                )
+
+                plt.savefig(save_fig_path, dpi=300)
+                plt.close()
+
+                print(f"Best edge heatmap saved: {save_fig_path}")
+                    
 
     # =========================
     # 5-Fold Summary
@@ -367,7 +421,7 @@ for model_num in model_list:
     # Save .mat
     # =========================
     io.savemat(
-        os.path.join(save_path, f"model_14_result.mat"),
+        os.path.join(save_path, f"model_45_result.mat"),
         {
             'fine_loss': fine_loss,
             'fine_acc': fine_acc,

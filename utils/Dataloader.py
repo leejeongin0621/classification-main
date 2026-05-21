@@ -1,6 +1,7 @@
 import numpy as np
-from scipy import io 
+from scipy import io
 import os
+import math
 import torch
 import random
 
@@ -56,166 +57,137 @@ def LoadIMU_EPO_simple(load_path, subject_list, num_session=5, num_class=100, ep
 
     return data, label
 
-def ReadMatData(load_path,subject_list):
-    
-    num_class = 100
-    
-    # Data Load
-    
-    data_list=[]
-    for s in subject_list:
-        tmp = io.loadmat(load_path+'/'+s+'.mat')
-        data_list.append(tmp['high']['x'].item) #[subject,session,class,channel,timepoint]
 
-    # convert to np
-    origin_data = np.stack(data_list, axis=0) #[subject,session,class,channel,timepoint]
-    origin_data = origin_data.transpose((0,1,2,4,3)) # [subject,session,class,timepoint,channel]
-    
-    # make label 
-    
-    label = np.zeros((origin_data.shape[0],origin_data.shape[1],num_class),dtype=int)
-    
-    for i in range(0,num_class):
-        label[:,:,i] = i # [subject,session,class,class_vector]
-        
-    return origin_data, label        
+# ============================================================
+# (private) z-정렬 / yaw 회전 헬퍼 — 아래 loader 들이 사용
+# ============================================================
+def _z_align_one_sensor(sig):
 
-def LoadEMGMatData(load_path, subject_list, num_class=100):
+    org = sig[0].astype(np.float64).copy()
+    flip_z = (org[2] <= 0)
+    if flip_z:
+        org[2] = -org[2]
 
-    '''
-    Load EMG data from .mat files
+    roll  = math.atan2(org[1], math.sqrt(org[2]**2 + org[0]**2))
+    pitch = math.atan2(-org[0], math.sqrt(org[2]**2 + org[1]**2))
+    c_r, s_r = math.cos(roll),  math.sin(roll)
+    c_p, s_p = math.cos(pitch), math.sin(pitch)
 
-    load_path: path to the dataset (outside folder of subject folders) 
-    subject_list: list of subject folder names to load      ex) ['KJG','SGY',...]
+    R_roll  = np.array([[1, 0, 0], [0, c_r, -s_r], [0, s_r, c_r]])
+    R_pitch = np.array([[ c_p, 0, s_p], [0, 1, 0], [-s_p, 0, c_p]])
+    R = R_pitch @ R_roll
 
-    
-    Data structure: numpy array [subject,session,class,timepoint,channel]
-    Label structure: numpy array [subject,session,class]
-    '''
-    data_list = []
-    for s in subject_list:
-        session_list = []
-        for session in np.arange(1,6):
-            word_list = []
-
-            for word in np.arange(1,num_class+1):
-            
-                load_file = load_path + '/' + s + '/EMG/session_{}/word{}.mat'.format(session,word)
-                tmp = io.loadmat(load_file)
-                word_list.append(tmp['save_data'])        # [word,timepoint,channel]
-            #end
-            session_list.append(word_list)   # [session,class,timepoint,channel]
-        #end
-        data_list.append(session_list)        # [subject,session,class,timepoint,channel]
-    #end
-
-    # convert to np
-    data = np.asarray(data_list)   # [subject,session,class,timepoint,channel]
-
-    # make label
-    label = np.zeros((data.shape[0],data.shape[1],num_class),dtype=int)
-
-    for i in range(0,num_class):
-        label[:,:,i] = i      # [subject,session,class]
-    #end
-
-    return data, label
+    s = sig.astype(np.float64).copy()
+    if flip_z:
+        s[:, 2] = -s[:, 2]
+    return (s @ R.T).astype(sig.dtype)
 
 
-def LoadIMUMatData(load_path, subject_list, num_class=100):
-    '''
-    Load IMU data from .mat files
+def _yaw_rotate_one_trial(trial, num_sensor, d_range, rng):
 
-    load_path: path to the dataset (outside folder of subject folders) 
-    subject_list: list of subject folder names to load      
-    ex) ['KJG','SGY',...]
-    
-    Data structure: numpy array [subject,session,class,timepoint,channel]
-    Label structure: numpy array [subject,session,class]
-    
-    '''
-    data_list = []
-    for s in subject_list:
-        session_list = []
-        for session in np.arange(1,6):
-            word_list = []
-            stacked = np.zeros((num_class,200, 15), dtype=float)
-            
-            for word in np.arange(1,num_class+1):            
-                load_file = load_path + '/' + s + '/IMU/session_{}/word{}.mat'.format(session,word)
-                A = io.loadmat(load_file)
-                
-                
-                if A['save_data'].shape[2] < 400:
-                    print("timepoint less than 400\nSub: {} Session: {}, Word: {}".format(s,session,word))
-                    T = A['save_data'].shape[2]
-                else:
-                    T = 400
-
-                # (T x 15)로 펴기
-                tmp = np.zeros((T, 15), dtype=float)
-                ch = 0
-                for sn in range(5):
-                    for xyz in range(3):
-                        tmp[:, ch] = A['save_data'][sn, xyz, :T]
-                        ch += 1
-                # [T,15]
-                data_resample = resample_to(tmp,200, kind="cubic", allow_extrap=True)
-                # [200,15]
-                if data_resample.shape != (200, 15):
-                    raise ValueError(f"resample_to_200 must return (200,15). Got {data_resample.shape}")
-                
-                
-                
-                mean = np.mean(data_resample, axis=0, keepdims=True)   # shape: (30, 1, 15)
-                std = np.std(data_resample, axis=0, keepdims=True)     # shape: (30, 1, 15)
-                normalized_resampdata = (data_resample - mean) / (std + 1e-8)	
-                stacked[word-1,:, :] = normalized_resampdata  # [class,timepoint,channel]
-
-            session_list.append(stacked)   # [session,class,timepoint,channel]    
-        data_list.append(session_list)        # [subject,session,class,timepoint,channel]
-
-    # convert to np
-    data = np.asarray(data_list)   # [subject,session,class,timepoint,channel]
-
-    # make label
-    label = np.zeros((data.shape[0],data.shape[1],num_class),dtype=int)
-
-    for i in range(0,num_class):
-        label[:,:,i] = i      # [subject,session,class]
-
-    return data, label
-
-
-def resample_to(data: np.ndarray, Sample_number: int,kind: str = "cubic", allow_extrap: bool = True) -> np.ndarray:
-    """
-    data: (N, C)  where N = time samples, C = channels (e.g., 15)
-    Returns: (Sample_number, C)
-    - MATLAB interp1(...,'spline')에 대응: kind='cubic'으로 근사
-    """
-    if data.ndim != 2:
-        raise ValueError(f"data must be 2D (N, C). Got shape {data.shape}")
-
-    N, C = data.shape
-    x = np.arange(N, dtype=float)
-    xq = np.linspace(0, N - 1, Sample_number)
-
-    # scipy 없이도 동작하도록 기본은 np.interp(1D)로 채널별 처리
-    # (np.interp는 선형보간이므로 cubic이 꼭 필요하면 scipy.interpolate를 권장)
-    if kind != "linear":
-        try:
-            from scipy.interpolate import interp1d
-            fill_value = "extrapolate" if allow_extrap else np.nan
-            f = interp1d(x, data, kind=kind, axis=0, fill_value=fill_value, bounds_error=False)
-            out = f(xq)
-        except Exception:
-            # scipy가 없거나 실패하면, 선형보간으로 안전 폴백
-            out = np.empty((200, C), dtype=float)
-            for ch in range(C):
-                out[:, ch] = np.interp(xq, x, data[:, ch])
-    else:
-        out = np.empty((200, C), dtype=float)
-        for ch in range(C):
-            out[:, ch] = np.interp(xq, x, data[:, ch])
-
+    out = np.empty_like(trial)
+    for i in range(num_sensor):
+        deg = rng.randint(max(0, d_range - 5) + 1, d_range + 5 + 2)
+        if rng.randint(0, 2) == 0:
+            deg = -deg
+        rad = math.radians(deg)
+        c, s = math.cos(rad), math.sin(rad)
+        R = np.array([[ c, s, 0],
+                      [-s, c, 0],
+                      [ 0, 0, 1]], dtype=trial.dtype)
+        out[:, 3*i:3*(i+1)] = trial[:, 3*i:3*(i+1)] @ R
     return out
+
+
+# ============================================================
+# Loader 1: z-정렬 + 정규화  (LoadIMU_EPO_simple + z-align)
+# ============================================================
+def LoadIMU_EPO_zaligned(load_path, subject_list, num_session=5, num_class=100,
+                          num_sensor=10, eps=1e-8):
+
+    data_list = []
+
+    for subj in subject_list:
+        session_list = []
+        for sess in range(1, num_session + 1):
+            fpath = os.path.join(load_path, subj, f"epo_session{sess}.mat")
+            mat = io.loadmat(fpath, struct_as_record=False, squeeze_me=True)
+
+            x = np.asarray(mat["epo"].x)                  # (200, 30, 100)
+            x = np.transpose(x, (2, 0, 1)).astype(np.float32)  # (100, 200, 30)
+
+            # 1) z-정렬 (per sample × per sensor)
+            for c in range(num_class):
+                for s in range(num_sensor):
+                    sig = x[c, :, 3*s:3*(s+1)]
+                    x[c, :, 3*s:3*(s+1)] = _z_align_one_sensor(sig)
+
+            # 2) 정규화 (LoadIMU_EPO_simple 과 동일)
+            mu  = x.mean(axis=1, keepdims=True)
+            sig = x.std (axis=1, keepdims=True)
+            x = (x - mu) / (sig + eps)
+
+            session_list.append(x)
+        data_list.append(session_list)
+
+    data = np.asarray(data_list)
+    label = np.zeros((len(subject_list), num_session, num_class), dtype=int)
+    for i in range(num_class):
+        label[:, :, i] = i
+
+    return data, label
+
+
+# ============================================================
+# Loader 2: z-정렬 + yaw 증강 + 정규화
+# ============================================================
+def LoadIMU_EPO_zaligned_yaw(load_path, subject_list, num_session=5, num_class=100,
+                              num_sensor=10, amount=2, d_range=25,
+                              seed=None, eps=1e-8):
+
+    rng = random.Random(seed) if seed is not None else random
+
+    data_list = []
+    for subj in subject_list:
+        session_list = []
+        for sess in range(1, num_session + 1):
+            fpath = os.path.join(load_path, subj, f"epo_session{sess}.mat")
+            mat = io.loadmat(fpath, struct_as_record=False, squeeze_me=True)
+
+            x = np.asarray(mat["epo"].x)                  # (200, 30, 100)
+            x = np.transpose(x, (2, 0, 1)).astype(np.float32)  # (100, 200, 30)
+
+            # 1) z-정렬
+            for c in range(num_class):
+                for s in range(num_sensor):
+                    sig = x[c, :, 3*s:3*(s+1)]
+                    x[c, :, 3*s:3*(s+1)] = _z_align_one_sensor(sig)
+
+            # 2) yaw 증강: 원본 + amount 개의 회전 복사본 concat
+            blocks = [x.copy()]
+            for _ in range(amount):
+                rot = np.empty_like(x)
+                for c in range(num_class):
+                    rot[c] = _yaw_rotate_one_trial(x[c], num_sensor, d_range, rng)
+                blocks.append(rot)
+            x_full = np.concatenate(blocks, axis=0)        # (class*(1+amount), 200, 30)
+
+            # 3) 정규화 (per-sample per-channel — LoadIMU_EPO_simple 과 동일)
+            mu  = x_full.mean(axis=1, keepdims=True)
+            sig = x_full.std (axis=1, keepdims=True)
+            x_full = (x_full - mu) / (sig + eps)
+
+            session_list.append(x_full)
+        data_list.append(session_list)
+
+    data = np.asarray(data_list)   # (subj, sess, class*(1+amount), time, ch)
+
+    # label: 각 round 마다 0..C-1 반복
+    total_per_session = num_class * (1 + amount)
+    label = np.zeros((len(subject_list), num_session, total_per_session), dtype=int)
+    for k in range(1 + amount):
+        for i in range(num_class):
+            label[:, :, k * num_class + i] = i
+
+    return data, label
+

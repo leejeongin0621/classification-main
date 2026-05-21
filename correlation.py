@@ -68,16 +68,6 @@ def make_word_word_corr(x_sample): # 각 세션에 하나씩 corr matrix 만들�
     np.fill_diagonal(A_corr, 1.0)
     return A_corr.astype(np.float32)
 
-# A_word = make_word_word_corr(IMU_data)
-
-# df_word_corr = pd.DataFrame(
-#     A_word,
-#     index=[f'word_{i+1}' for i in range(100)],
-#     columns=[f'word_{i+1}' for i in range(100)]
-# )
-
-# df_word_corr.to_excel('all_subject_all_session_word_to_word_corr.xlsx')
-
 
 def get_edge_ranking(A):
     edges = []
@@ -119,43 +109,6 @@ def make_word_avg_corr(X_word): # 4세션기반 평균 corr 구하기
     np.fill_diagonal(A_mean, 1.0)
     return A_mean.astype(np.float32)
 
-# def compare_subject_fold_word(IMU_data, subject_idx, fold_idx, word, top_k=20):
-#     X_test_word = IMU_data[subject_idx, fold_idx, word]   # (200, 30)
-
-#     train_sessions = [s for s in range(5) if s != fold_idx]
-#     X_train_word = IMU_data[subject_idx, train_sessions, word]   # (4, 200, 30)
-
-#     A_train = make_word_avg_corr(X_train_word)
-#     A_test  = make_sample_corr(X_test_word)
-
-#     df_train = make_ranking_df(A_train, top_k)
-#     df_test  = make_ranking_df(A_test, top_k)
-
-#     df_train['type'] = 'train'
-#     df_test['type'] = 'test'
-
-#     df_train['subject_idx'] = subject_idx
-#     df_test['subject_idx'] = subject_idx
-
-#     df_train['fold_idx'] = fold_idx
-#     df_test['fold_idx'] = fold_idx
-
-#     df_train['word'] = word
-#     df_test['word'] = word
-
-#     df = pd.concat([df_train, df_test], axis=0, ignore_index=True)
-#     return df
-
-# df = compare_subject_fold_word(
-#     IMU_data=IMU_data,
-#     subject_idx=5,
-#     fold_idx=0,
-#     word=1,
-#     top_k=20
-# )
-
-# df.to_excel('subject5_fold0_word1_corr_compare.xlsx', index=False)
-
 
 def make_global_corr(X_data): # 모든 sample concat → corr
     """
@@ -196,11 +149,6 @@ df = pd.DataFrame(
     columns=[f'node_{i}' for i in range(10)]
 )
 
-# 엑셀 저장
-df.to_excel('global_corr_matrix.xlsx')
-
-print("엑셀 저장 완료")
-
 def make_word_corr_dict(X_train, y_train):
     """
     X_train: (N, 200, 30)
@@ -215,4 +163,116 @@ def make_word_corr_dict(X_train, y_train):
         word_corr_dict[int(word)] = make_word_avg_corr(X_word)
 
     return word_corr_dict
+
+
+# ============================================================
+# Subject-Independent (LOSO) — fold 마다 train/test top-K edge 추출
+# ============================================================
+def loso_top_edges(IMU_data, subject_list, top_k=20,
+                   save_path='LOSO_top_edges.xlsx'):
+    
+    num_subject = IMU_data.shape[0]
+    assert len(subject_list) == num_subject
+
+    sheets = {}
+
+    for test_idx, test_subj in enumerate(subject_list):
+        # ---- LOSO split ----
+        train_mask = np.ones(num_subject, dtype=bool)
+        train_mask[test_idx] = False
+        train_subj_idx = np.where(train_mask)[0]
+
+        X_train = IMU_data[train_subj_idx].reshape(-1, 200, 30)   # 4500 word
+        X_test  = IMU_data[test_idx].reshape(-1, 200, 30)         # 500 word
+
+        # ---- corr matrix → top-K edge ----
+        A_train = make_global_corr(X_train)
+        A_test  = make_global_corr(X_test)
+
+        edges_train = get_edge_ranking(A_train)[:top_k]
+        edges_test  = get_edge_ranking(A_test )[:top_k]
+
+        # ---- side-by-side DataFrame ----
+        rows = []
+        for r in range(top_k):
+            i_tr, j_tr, v_tr = edges_train[r]
+            i_te, j_te, v_te = edges_test [r]
+            rows.append({
+                'rank':       r + 1,
+                'train_edge': f"({i_tr}-{j_tr})",
+                'train_corr': v_tr,
+                'test_edge':  f"({i_te}-{j_te})",
+                'test_corr':  v_te,
+            })
+        sheets[f"{test_subj}"] = pd.DataFrame(rows)
+
+        print(f"[fold {test_idx+1:>2d}/{num_subject}] test={test_subj}  → top-{top_k} 저장")
+
+    # ---- Excel 저장 ----
+    with pd.ExcelWriter(save_path) as writer:
+        for sheet_name, df_sheet in sheets.items():
+            df_sheet.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+    print(f"\n저장: {save_path}")
+
+
+# 실행: fold 별 train top-20 vs test top-20
+loso_top_edges(
+    IMU_data     = IMU_data,
+    subject_list = subject_list,
+    top_k        = 20,
+    save_path    = os.path.join(save_path, 'LOSO_top_edges.xlsx'),
+)
+
+
+# ============================================================
+# Subject 별 session-wise corr top-K — within-subject 일관성 확인용
+# ============================================================
+def per_subject_session_top_edges(IMU_data, subject_list, top_k=20,
+                                   save_path='per_subject_session_top_edges.xlsx'):
+    """
+    각 subject 의 각 session 마다 corr matrix 계산 후 top-K edge 추출.
+    한 subject 안에서 5 session 들의 top-K 가 얼마나 비슷한지 (= within-subject 일관성).
+
+    Excel: subject 마다 sheet 1장, session 1~5 가 column 으로 나란히.
+    """
+    num_subject, num_session = IMU_data.shape[0], IMU_data.shape[1]
+    sheets = {}
+
+    for s_idx, subj in enumerate(subject_list):
+        # 각 session 마다 top-K edge 미리 계산
+        per_sess_edges = []
+        for sess in range(num_session):
+            X_sess = IMU_data[s_idx, sess].reshape(-1, 200, 30)   # (100, 200, 30)
+            A_sess = make_global_corr(X_sess)
+            edges  = get_edge_ranking(A_sess)[:top_k]
+            per_sess_edges.append(edges)
+
+        # rank 1..top_k 행으로 정리, session 별 column
+        rows = []
+        for r in range(top_k):
+            row = {'rank': r + 1}
+            for sess in range(num_session):
+                i, j, v = per_sess_edges[sess][r]
+                row[f'sess{sess+1}_edge'] = f"({i}-{j})"
+                row[f'sess{sess+1}_corr'] = v
+            rows.append(row)
+
+        sheets[subj] = pd.DataFrame(rows)
+        print(f"[{s_idx+1:>2d}/{num_subject}] {subj} → 5 session top-{top_k} 저장")
+
+    with pd.ExcelWriter(save_path) as writer:
+        for sheet_name, df_sheet in sheets.items():
+            df_sheet.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+    print(f"\n저장: {save_path}")
+
+
+# 실행: subject 별 session-wise top-20
+per_subject_session_top_edges(
+    IMU_data     = IMU_data,
+    subject_list = subject_list,
+    top_k        = 20,
+    save_path    = os.path.join(save_path, 'per_subject_session_top_edges.xlsx'),
+)
 

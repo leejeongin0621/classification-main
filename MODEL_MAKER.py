@@ -2,7 +2,7 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import torch
-from utils.Model import IMU_Transformer,IMU_BiLSTM,IMU_conso_processing_Transformer,IMU_STGCN
+from utils.Model import IMU_Transformer,IMU_BiLSTM,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM
 from os import path
 from pathlib import Path
 
@@ -19,6 +19,7 @@ nhead = 4
 nCh = 30
 IMU_conv_channel = 16
 conso_layers = 16 
+k=0
 
 #num_layers = 16      # Transformer 인코더 레이어 수
 #hidden_dim = 64    # Transformer 모델의 숨겨진 차원 크기
@@ -29,25 +30,19 @@ conso_layers = 16
 
 model = IMU_STGCN(
     num_class=num_classes,
-    in_channels=3,
+    in_channels=3,                   
     graph_args={'max_hop': 1, 'dilation': 1},
     edge_importance_weighting=True,
-    dropout=gap_dropout
+    dropout=gap_dropout,
 ).to(device)
 
-# model = AGCN(
-#     num_class=num_classes,
-#     in_channels=3,
-#     graph_args={'max_hop': 1, 'dilation': 1},
-#     dropout=gap_dropout
-# ).to(device)
-
-# model = IMU_STGCNINCEPTION(
-#     num_class=num_classes,
-#     in_channels=3,
-#     graph_args={'max_hop': 1, 'dilation': 1},
-#     edge_importance_weighting=True,
-#     dropout=gap_dropout
+# model = BiLSTM(
+#     num_classes=num_classes,
+#     nCh=nCh,              # 30
+#     nFilters=64,
+#     kernel_size=7,
+#     hidden_dim=128,
+#     gap_dropout=0.5,
 # ).to(device)
 
 # model = EMG_IMU_BiLSTM(
@@ -63,16 +58,8 @@ model = IMU_STGCN(
 #     nhead=nhead
 # ).to(device)
 
-# model = IMU_conso_processing_Transformer(
-#     num_classes=num_classes,
-#     num_layers=num_layers,
-#     d_model=hidden_dim,
-#     nhead=nhead,
-#     IMU_conv_channel=IMU_conv_channel,
-#   conso_layers=conso_layers
-# ).to(device)
 
-#  model = IMU_BiLSTM(
+# model = IMU_BiLSTM(
 #    num_classes=num_classes,
 #    hidden_dim=hidden_dim,
 #    num_layers=num_layers,
@@ -82,12 +69,12 @@ model = IMU_STGCN(
 
 # 모델 전체 저장
 Path("models").mkdir(exist_ok=True)
-model_num = 37
-save_path = "./models/Model_37.pt"
+model_num = 92
+save_path = f"./models/Model_{model_num}.pt"
 
 
 # 모델에 더미 입력 전달하여 정상 작동 확인
-dummy_input_IMU = torch.randn(20, 200, 30).to(device)
+dummy_input_IMU = torch.randn(20, 200, 30).to(device)   # 10 sensor × 3 axis
 
 output = model(dummy_input_IMU)  # 더미 입력으로 테스트
 
@@ -103,7 +90,7 @@ else:
 # 모델 전체 불러오기
 import torch
 
-model_num = 37
+model_num = 92
 
 save_path = "./models/Model_{}.pt".format(model_num)
 model_loaded = torch.load(save_path, weights_only=False, map_location=device)
