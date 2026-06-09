@@ -57,6 +57,17 @@ def LoadIMU_EPO_simple(load_path, subject_list, num_session=5, num_class=100, ep
 
     return data, label
 
+#채널별로 센서 보정 
+
+def _load_fix_matrix(fix_path):
+    mat = io.loadmat(fix_path, squeeze_me=True)
+    return mat['ans'].astype(np.float32)  # (30, 30)
+
+def _apply_fix(x, fix):
+    """채널 순서 보정: (num_class, 200, 30) @ (30, 30)"""
+    return (x.astype(np.float64) @ fix.T).astype(x.dtype)
+
+
 
 # ============================================================
 # (private) z-정렬 / yaw 회전 헬퍼 — 아래 loader 들이 사용
@@ -64,7 +75,7 @@ def LoadIMU_EPO_simple(load_path, subject_list, num_session=5, num_class=100, ep
 def _z_align_one_sensor(sig):
 
     org = sig[0].astype(np.float64).copy()
-    flip_z = (org[2] <= 0)
+    flip_z = (org[2] <= 0) # z축이 양수 방향을 향하도록 뒤집기 
     if flip_z:
         org[2] = -org[2]
 
@@ -78,17 +89,17 @@ def _z_align_one_sensor(sig):
     R = R_pitch @ R_roll
 
     s = sig.astype(np.float64).copy()
-    if flip_z:
+    if flip_z: #전체 샘플 반전 
         s[:, 2] = -s[:, 2]
-    return (s @ R.T).astype(sig.dtype)
+    return (s @ R.T).astype(sig.dtype) #회전 적용 
 
 
 def _yaw_rotate_one_trial(trial, num_sensor, d_range, rng):
 
     out = np.empty_like(trial)
     for i in range(num_sensor):
-        deg = rng.randint(max(0, d_range - 5) + 1, d_range + 5 + 2)
-        if rng.randint(0, 2) == 0:
+        deg = rng.randint(max(0, d_range - 5), d_range + 6)
+        if rng.randint(0, 1) == 0:
             deg = -deg
         rad = math.radians(deg)
         c, s = math.cos(rad), math.sin(rad)
@@ -98,15 +109,12 @@ def _yaw_rotate_one_trial(trial, num_sensor, d_range, rng):
         out[:, 3*i:3*(i+1)] = trial[:, 3*i:3*(i+1)] @ R
     return out
 
+def LoadIMU_EPO_zaligned_fix(load_path, subject_list, num_session=5, num_class=100,
+                              num_sensor=10, eps=1e-8):
 
-# ============================================================
-# Loader 1: z-정렬 + 정규화  (LoadIMU_EPO_simple + z-align)
-# ============================================================
-def LoadIMU_EPO_zaligned(load_path, subject_list, num_session=5, num_class=100,
-                          num_sensor=10, eps=1e-8):
+    fix = _load_fix_matrix(os.path.join(load_path, 'fix.mat'))
 
     data_list = []
-
     for subj in subject_list:
         session_list = []
         for sess in range(1, num_session + 1):
@@ -116,13 +124,17 @@ def LoadIMU_EPO_zaligned(load_path, subject_list, num_session=5, num_class=100,
             x = np.asarray(mat["epo"].x)                  # (200, 30, 100)
             x = np.transpose(x, (2, 0, 1)).astype(np.float32)  # (100, 200, 30)
 
-            # 1) z-정렬 (per sample × per sensor)
+            # 1) 채널 순서 보정
+            for c in range(num_class):
+                x[c] = _apply_fix(x[c], fix)
+
+            # 2) z-정렬 (per sample × per sensor)
             for c in range(num_class):
                 for s in range(num_sensor):
                     sig = x[c, :, 3*s:3*(s+1)]
                     x[c, :, 3*s:3*(s+1)] = _z_align_one_sensor(sig)
 
-            # 2) 정규화 (LoadIMU_EPO_simple 과 동일)
+            # 3) 정규화
             mu  = x.mean(axis=1, keepdims=True)
             sig = x.std (axis=1, keepdims=True)
             x = (x - mu) / (sig + eps)
@@ -137,14 +149,11 @@ def LoadIMU_EPO_zaligned(load_path, subject_list, num_session=5, num_class=100,
 
     return data, label
 
+def LoadIMU_EPO_zaligned_fix_yaw(load_path, subject_list, num_session=5, num_class=100,
+                                  num_sensor=10, amount=2, d_range=25,
+                                  seed=None, eps=1e-8):
 
-# ============================================================
-# Loader 2: z-정렬 + yaw 증강 + 정규화
-# ============================================================
-def LoadIMU_EPO_zaligned_yaw(load_path, subject_list, num_session=5, num_class=100,
-                              num_sensor=10, amount=2, d_range=25,
-                              seed=None, eps=1e-8):
-
+    fix = _load_fix_matrix(os.path.join(load_path, 'fix.mat'))
     rng = random.Random(seed) if seed is not None else random
 
     data_list = []
@@ -154,35 +163,38 @@ def LoadIMU_EPO_zaligned_yaw(load_path, subject_list, num_session=5, num_class=1
             fpath = os.path.join(load_path, subj, f"epo_session{sess}.mat")
             mat = io.loadmat(fpath, struct_as_record=False, squeeze_me=True)
 
-            x = np.asarray(mat["epo"].x)                  # (200, 30, 100)
-            x = np.transpose(x, (2, 0, 1)).astype(np.float32)  # (100, 200, 30)
+            x = np.asarray(mat["epo"].x)
+            x = np.transpose(x, (2, 0, 1)).astype(np.float32)
 
-            # 1) z-정렬
+            # 1) 채널 순서 보정
+            for c in range(num_class):
+                x[c] = _apply_fix(x[c], fix)
+
+            # 2) Z 정렬
             for c in range(num_class):
                 for s in range(num_sensor):
                     sig = x[c, :, 3*s:3*(s+1)]
                     x[c, :, 3*s:3*(s+1)] = _z_align_one_sensor(sig)
 
-            # 2) yaw 증강: 원본 + amount 개의 회전 복사본 concat
+            # 3) Yaw 증강
             blocks = [x.copy()]
             for _ in range(amount):
                 rot = np.empty_like(x)
                 for c in range(num_class):
                     rot[c] = _yaw_rotate_one_trial(x[c], num_sensor, d_range, rng)
                 blocks.append(rot)
-            x_full = np.concatenate(blocks, axis=0)        # (class*(1+amount), 200, 30)
+            x_full = np.concatenate(blocks, axis=0)
 
-            # 3) 정규화 (per-sample per-channel — LoadIMU_EPO_simple 과 동일)
+            # 4) 정규화
             mu  = x_full.mean(axis=1, keepdims=True)
-            sig = x_full.std (axis=1, keepdims=True)
+            sig = x_full.std(axis=1, keepdims=True)
             x_full = (x_full - mu) / (sig + eps)
 
             session_list.append(x_full)
         data_list.append(session_list)
 
-    data = np.asarray(data_list)   # (subj, sess, class*(1+amount), time, ch)
+    data = np.asarray(data_list)
 
-    # label: 각 round 마다 0..C-1 반복
     total_per_session = num_class * (1 + amount)
     label = np.zeros((len(subject_list), num_session, total_per_session), dtype=int)
     for k in range(1 + amount):
@@ -190,4 +202,98 @@ def LoadIMU_EPO_zaligned_yaw(load_path, subject_list, num_session=5, num_class=1
             label[:, :, k * num_class + i] = i
 
     return data, label
+
+
+# ============================================================
+# Loader 1: z-정렬 + 정규화  (LoadIMU_EPO_simple + z-align)
+# ============================================================
+# def LoadIMU_EPO_zaligned(load_path, subject_list, num_session=5, num_class=100,
+#                           num_sensor=10, eps=1e-8):
+
+#     data_list = []
+
+#     for subj in subject_list:
+#         session_list = []
+#         for sess in range(1, num_session + 1):
+#             fpath = os.path.join(load_path, subj, f"epo_session{sess}.mat")
+#             mat = io.loadmat(fpath, struct_as_record=False, squeeze_me=True)
+
+#             x = np.asarray(mat["epo"].x)                  # (200, 30, 100)
+#             x = np.transpose(x, (2, 0, 1)).astype(np.float32)  # (100, 200, 30)
+
+#             # 1) z-정렬 (per sample × per sensor)
+#             for c in range(num_class):
+#                 for s in range(num_sensor):
+#                     sig = x[c, :, 3*s:3*(s+1)]
+#                     x[c, :, 3*s:3*(s+1)] = _z_align_one_sensor(sig)
+
+#             # 2) 정규화 (LoadIMU_EPO_simple 과 동일)
+#             mu  = x.mean(axis=1, keepdims=True)
+#             sig = x.std (axis=1, keepdims=True)
+#             x = (x - mu) / (sig + eps)
+
+#             session_list.append(x)
+#         data_list.append(session_list)
+
+#     data = np.asarray(data_list)
+#     label = np.zeros((len(subject_list), num_session, num_class), dtype=int)
+#     for i in range(num_class):
+#         label[:, :, i] = i
+
+#     return data, label
+
+
+# # ============================================================
+# # Loader 2: z-정렬 + yaw 증강 + 정규화
+# # ============================================================
+# def LoadIMU_EPO_zaligned_yaw(load_path, subject_list, num_session=5, num_class=100,
+#                               num_sensor=10, amount=3, d_range=35,
+#                               seed=None, eps=1e-8):
+
+#     rng = random.Random(seed) if seed is not None else random
+
+#     data_list = []
+#     for subj in subject_list:
+#         session_list = []
+#         for sess in range(1, num_session + 1):
+#             fpath = os.path.join(load_path, subj, f"epo_session{sess}.mat")
+#             mat = io.loadmat(fpath, struct_as_record=False, squeeze_me=True)
+
+#             x = np.asarray(mat["epo"].x)                  # (200, 30, 100)
+#             x = np.transpose(x, (2, 0, 1)).astype(np.float32)  # (100, 200, 30)
+
+#             # 1) z-정렬
+#             for c in range(num_class):
+#                 for s in range(num_sensor):
+#                     sig = x[c, :, 3*s:3*(s+1)]
+#                     x[c, :, 3*s:3*(s+1)] = _z_align_one_sensor(sig)
+
+#             # 2) yaw 증강: 원본 + amount 개의 회전 복사본 concat
+#             blocks = [x.copy()]
+#             for _ in range(amount):
+#                 rot = np.empty_like(x)
+#                 for c in range(num_class):
+#                     rot[c] = _yaw_rotate_one_trial(x[c], num_sensor, d_range, rng)
+#                 blocks.append(rot)
+#             x_full = np.concatenate(blocks, axis=0)        # (class*(1+amount), 200, 30)
+
+#             # 3) 정규화 (per-sample per-channel — LoadIMU_EPO_simple 과 동일)
+#             mu  = x_full.mean(axis=1, keepdims=True)
+#             sig = x_full.std (axis=1, keepdims=True)
+#             x_full = (x_full - mu) / (sig + eps)
+
+#             session_list.append(x_full)
+#         data_list.append(session_list)
+
+#     data = np.asarray(data_list)   # (subj, sess, class*(1+amount), time, ch)
+
+#     # label: 각 round 마다 0..C-1 반복
+#     total_per_session = num_class * (1 + amount)
+#     label = np.zeros((len(subject_list), num_session, total_per_session), dtype=int)
+#     for k in range(1 + amount):
+#         for i in range(num_class):
+#             label[:, :, k * num_class + i] = i
+
+#     return data, label
+
 

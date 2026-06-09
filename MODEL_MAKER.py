@@ -2,7 +2,7 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import torch
-from utils.Model import IMU_Transformer,IMU_BiLSTM,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM
+from utils.Model import IMU_Transformer,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM
 from os import path
 from pathlib import Path
 
@@ -12,7 +12,7 @@ print(device)
 
 # 모델 초기화
 num_classes = 100   # 단어 수 (클래스 수)
-hidden_dim = 128
+hidden_dim = 250
 num_layers = 2
 gap_dropout = 0.2
 nhead = 4
@@ -39,9 +39,9 @@ model = IMU_STGCN(
 # model = BiLSTM(
 #     num_classes=num_classes,
 #     nCh=nCh,              # 30
-#     nFilters=64,
-#     kernel_size=7,
-#     hidden_dim=128,
+#     nFilters=250,
+#     kernel_size=8,
+#     hidden_dim=250,
 #     gap_dropout=0.5,
 # ).to(device)
 
@@ -54,22 +54,13 @@ model = IMU_STGCN(
 # model = IMU_Transformer(
 #     num_classes=num_classes,
 #     num_layers=num_layers,
-#     d_model=hidden_dim,
+#     d_model=64,
 #     nhead=nhead
-# ).to(device)
-
-
-# model = IMU_BiLSTM(
-#    num_classes=num_classes,
-#    hidden_dim=hidden_dim,
-#    num_layers=num_layers,
-#    gap_dropout=gap_dropout,
-#    nCh=nCh
 # ).to(device)
 
 # 모델 전체 저장
 Path("models").mkdir(exist_ok=True)
-model_num = 92
+model_num = 98
 save_path = f"./models/Model_{model_num}.pt"
 
 
@@ -86,11 +77,12 @@ else:
     print("File already exists at {}".format(save_path))
 #end
 
+
 #%%
 # 모델 전체 불러오기
 import torch
 
-model_num = 92
+model_num = 98
 
 save_path = "./models/Model_{}.pt".format(model_num)
 model_loaded = torch.load(save_path, weights_only=False, map_location=device)

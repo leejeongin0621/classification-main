@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
-from utils.Dataloader import LoadIMU_EPO_simple,LoadIMU_EPO_zaligned
+from utils.Dataloader import LoadIMU_EPO_simple, LoadIMU_EPO_zaligned_fix_yaw, LoadIMU_EPO_zaligned_fix
 from scipy import io
 import random
 from tqdm import tqdm
@@ -43,27 +43,16 @@ model_path = os.path.join(path_sub_proj, 'models')
 os.makedirs(save_path, exist_ok=True)
 os.makedirs(model_path, exist_ok=True)
 
-# LOSO 는 train set 이 크므로 (4500 sample) 좀 더 짧게
 max_epochs = 1100
 min_epochs = 1000
 patience   = 30
 batch_size = 128
 lr         = 1e-3
 
-model_pt_path = os.path.join('models', f"Model_90.pt")
-run_tag = f"LOSO_30ch_m90_BILSTM"
+model_pt_path = os.path.join('models', f"Model_95.pt")
+run_tag = f"LOSO_30ch_bilstm"
 
 base_seed = 2023
-
-# =========================
-# Data Load
-# =========================
-print("Loading data...")
-IMU_data, IMU_label = LoadIMU_EPO_simple(load_path, subject_list)
-# shape: (subject, session, class, 200, 30)
-print(f"data shape: {IMU_data.shape}, label shape: {IMU_label.shape}")
-assert IMU_data.shape == (num_subject, num_session, num_class, num_time_IMU, num_channel_IMU), \
-    f"unexpected data shape: {IMU_data.shape}"
 
 # =========================
 # LOSO loop
@@ -93,16 +82,29 @@ for test_idx, test_subj in enumerate(subject_list):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.enabled = False
 
-    # ---- split ----
-    train_subj_mask = np.ones(num_subject, dtype=bool)
-    train_subj_mask[test_idx] = False
-    train_subj_idx = np.where(train_subj_mask)[0]   # 9개
+    # ---- split + train-only augmentation ----
+    train_subjects = [s for i, s in enumerate(subject_list) if i != test_idx]
+    test_subjects  = [test_subj]
 
-    X_train = IMU_data[train_subj_idx].reshape(-1, num_time_IMU, num_channel_IMU)
-    y_train = IMU_label[train_subj_idx].reshape(-1)
+    X_train_data, y_train_data = LoadIMU_EPO_simple(
+        load_path,
+        train_subjects,
+        num_session=num_session,
+        num_class=num_class,
+    )
 
-    X_test  = IMU_data[test_idx].reshape(-1, num_time_IMU, num_channel_IMU)
-    y_test  = IMU_label[test_idx].reshape(-1)
+    X_test_data, y_test_data = LoadIMU_EPO_simple(
+        load_path,
+        test_subjects,
+        num_session=num_session,
+        num_class=num_class,
+    )
+
+    X_train = X_train_data.reshape(-1, num_time_IMU, num_channel_IMU)
+    y_train = y_train_data.reshape(-1)
+
+    X_test = X_test_data.reshape(-1, num_time_IMU, num_channel_IMU)
+    y_test = y_test_data.reshape(-1)
 
     # ---- 30ch ----
     X_train_t = torch.tensor(X_train, dtype=torch.float32)

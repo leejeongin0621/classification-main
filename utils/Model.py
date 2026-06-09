@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules.transformer import _get_clones
 from utils.tgcn import ConvTemporalGraphical
-from utils.graph import Graph, make_laplacian_pe
+from utils.graph import Graph
 import numpy as np
 
 
@@ -13,27 +13,20 @@ import numpy as np
 #----------------------------
 class IMU_STGCN(nn.Module):
     def __init__(self, in_channels, num_class, graph_args,
-                 edge_importance_weighting, dropout, k=0):
+                 edge_importance_weighting, dropout, ):
         super().__init__()
 
-        #self.k = k  # Laplacian PE eigenvector 개수
-        self.in_channels = in_channels   # 3 (raw) or 4 (raw + magnitude)
+        self.in_channels = in_channels
 
         # load graph
         self.graph = Graph(**graph_args) # graph.py의 Graph 클래스에서 정의한 그래프 구조를 불러옴
         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
-        self.register_buffer('A', A)
-
-        # if self.k > 0:
-        #     lap_pe = make_laplacian_pe(self.graph.A[0], k=self.k, use_abs=True)
-        #     self.register_buffer('pe', torch.tensor(lap_pe, dtype=torch.float32))
-        # else:
-        #      self.pe = None
+        self.register_buffer('A', A) 
 
         #build networks
         # 분리 ST-GCN baseline: GCN(graph) + TCN(temporal) 분리 처리
         spatial_kernel_size = A.size(0)
-        temporal_kernel_size = 11
+        temporal_kernel_size = 9
         kernel_size = (temporal_kernel_size, spatial_kernel_size)
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
         self.st_gcn_networks = nn.ModuleList((
@@ -45,6 +38,19 @@ class IMU_STGCN(nn.Module):
             st_gcn(128, 128, kernel_size, 1, dropout),
             st_gcn(128, 256, kernel_size, 2, dropout),  # 100→50
         ))
+
+        # temporal_kernel_size = 11
+        # kernel_size = (temporal_kernel_size, spatial_kernel_size)
+        # self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
+        # self.st_gcn_networks = nn.ModuleList((
+        #     st_gcn(in_channels, 64,  kernel_size, 1, residual=False, dropout=0),
+        #     st_gcn(64,  64,  kernel_size, 1, dropout),
+        #     st_gcn(64,  64,  kernel_size, 1, dropout),
+        #     st_gcn(64,  128, kernel_size, 2, dropout),  # 200→100
+        #     st_gcn(128, 128, kernel_size, 1, dropout),
+        #     st_gcn(128, 128, kernel_size, 1, dropout),
+        #     st_gcn(128, 256, kernel_size, 2, dropout),  # 100→50
+        # ))
         
 
         # initialize parameters for edge importance weighting
@@ -187,21 +193,8 @@ import torch.nn as nn
 
 
 class BiLSTM(nn.Module):
-    """
-    TensorFlow cnn_blstm 구조에 맞춘 PyTorch 버전
-
-    입력: x_IMU (B, 200, nCh)
-    처리:
-    Conv1d + BN + ReLU + AvgPool 4단
-    -> BiLSTM
-    -> GlobalAveragePooling
-    -> Dropout
-    -> FC
-
-    출력: logits
-    """
-    def __init__(self, num_classes, nCh=30, nFilters=64, kernel_size=7,
-                 hidden_dim=128, gap_dropout=0.5):
+    def __init__(self, num_classes, nCh=30, nFilters=250, kernel_size=8,
+                 hidden_dim=250, gap_dropout=0.5):
         super().__init__()
 
         # TensorFlow Conv1D 기본 padding='valid'와 맞추려면 padding=0
@@ -268,9 +261,55 @@ class BiLSTM(nn.Module):
 
         return (logits, feat) if return_feat else logits
 
+class PreNormTransformerEncoder(nn.Module):
+    def __init__(self, encoder_layer, num_layers):
+        super().__init__()
+        self.layers = _get_clones(encoder_layer, num_layers)
+        self.num_layers = num_layers
+
+    def forward(self, src):
+        output = src
+
+        for mod in self.layers:
+            output = mod(output)
+
+        return output
+
+class PreNormTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation="relu"):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        if activation == "relu":
+            self.activation = F.relu
+        elif activation == "gelu":
+            self.activation = F.gelu
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+    def forward(self, src):
+        # Self-attention with pre-norm
+        src2 = self.norm1(src)
+        attn_output, _ = self.self_attn(src2, src2, src2)
+        src = src + self.dropout1(attn_output)
+
+        # Feedforward with pre-norm
+        src2 = self.norm2(src)
+        ff_output = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        src = src + self.dropout2(ff_output)
+
+        return src
 
 # ============================================================
-# 2) IMU only Transformer (EMG_IMU_Transformer 에서 EMG 제거)
+# 2) IMU only Transformer (EMG_IMU_Transformer 에서 EMG 제거) 
 # ============================================================
 class IMU_Transformer(nn.Module):
     """
@@ -285,19 +324,25 @@ class IMU_Transformer(nn.Module):
             nn.Conv1d(in_channels=30, out_channels=64, kernel_size=7, padding=3),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.AvgPool1d(2)  # 200 -> 100
+            nn.AvgPool1d(2) 
         )
         self.IMU_conv2 = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=7, padding=3),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.AvgPool1d(2)  # 100 -> 50
+            nn.AvgPool1d(2)  
         )
         self.IMU_conv3 = nn.Sequential(
-            nn.Conv1d(64, d_model, kernel_size=7, padding=3),
-            nn.BatchNorm1d(d_model),
+            nn.Conv1d(64, 64, kernel_size=7, padding=3),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.AvgPool1d(2)  # 50 -> 25
+            nn.AvgPool1d(2)  
+        )
+        self.IMU_conv4 = nn.Sequential(
+        nn.Conv1d(64, d_model, kernel_size=7, padding=3),
+        nn.BatchNorm1d(d_model),
+        nn.ReLU(),
+        nn.AvgPool1d(2)  
         )
 
         self.pos_embedding = nn.Embedding(max_len, d_model)
@@ -318,15 +363,16 @@ class IMU_Transformer(nn.Module):
         x = self.IMU_conv1(x)       # (B, 64, 100)
         x = self.IMU_conv2(x)       # (B, 64, 50)
         x = self.IMU_conv3(x)       # (B, d_model, 25)
+        x = self.IMU_conv4(x)       # (B, d_model, 12)
 
-        x = x.permute(0, 2, 1)      # (B, 25, d_model)
+        x = x.permute(0, 2, 1)      # (B, 12, d_model)
         B, T, D = x.shape
 
         pos = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
         x = x + self.pos_embedding(pos)
 
         # PreNormTransformerEncoderLayer는 batch_first=True로 MultiheadAttention을 쓰므로 (B,T,D) 그대로 넣어도 됨.
-        out = self.transformer(x)   # (B, 25, d_model)
+        out = self.transformer(x)   # (B, 12, d_model)
 
         feat = out.mean(dim=1)      # (B, d_model)
         logits = self.classifier(feat)
