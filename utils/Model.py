@@ -13,7 +13,7 @@ import numpy as np
 #----------------------------
 class IMU_STGCN(nn.Module):
     def __init__(self, in_channels, num_class, graph_args,
-                 edge_importance_weighting, dropout, ):
+                 edge_importance_weighting, dropout):
         super().__init__()
 
         self.in_channels = in_channels
@@ -21,12 +21,12 @@ class IMU_STGCN(nn.Module):
         # load graph
         self.graph = Graph(**graph_args) # graph.py의 Graph 클래스에서 정의한 그래프 구조를 불러옴
         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
-        self.register_buffer('A', A) 
+        self.register_buffer('A', A)
 
         #build networks
         # 분리 ST-GCN baseline: GCN(graph) + TCN(temporal) 분리 처리
         spatial_kernel_size = A.size(0)
-        temporal_kernel_size = 9
+        temporal_kernel_size = 11
         kernel_size = (temporal_kernel_size, spatial_kernel_size)
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
         self.st_gcn_networks = nn.ModuleList((
@@ -62,7 +62,6 @@ class IMU_STGCN(nn.Module):
         else:
             self.edge_importance = [1] * len(self.st_gcn_networks)
 
-        # fcn for prediction
         # fcn for prediction
         self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
 
@@ -112,7 +111,7 @@ class IMU_STGCN(nn.Module):
         x = x.permute(0, 1, 3, 4, 2).contiguous()
         x = x.view(N * M, C, T, V)
 
-        # forwad
+        # forward
         for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
             x, _ = gcn(x, self.A * importance)
 
@@ -146,10 +145,8 @@ class st_gcn(nn.Module):
         assert kernel_size[0] % 2 == 1
         padding = ((kernel_size[0] - 1) // 2, 0)
 
-        self.gcn = ConvTemporalGraphical(in_channels, out_channels,
-                                         kernel_size[1])
+        self.gcn = ConvTemporalGraphical(in_channels, out_channels, kernel_size[1])
 
-        # 단일 TCN (baseline)
         self.tcn = nn.Sequential(
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
@@ -187,7 +184,146 @@ class st_gcn(nn.Module):
         return self.relu(x), A
 
 
-#biLSTM 수정본 
+class EdgeModule(nn.Module):
+    """[mean, |diff|] → Edge TCN → line-graph Edge GCN → node aggregate"""
+
+    def __init__(self, in_channels, edge_channels, temporal_kernel_size,
+                 edge_src, edge_dst, num_nodes):
+        super().__init__()
+        E = edge_src.shape[0]
+        padding = (temporal_kernel_size - 1) // 2
+
+        self.edge_tcn = nn.Sequential(
+            nn.Conv2d(in_channels * 2, edge_channels,
+                      kernel_size=(temporal_kernel_size, 1),
+                      padding=(padding, 0), bias=False),
+            nn.BatchNorm2d(edge_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        A_L = self._build_line_graph(edge_src, edge_dst, E, num_nodes)
+        self.register_buffer('A_line', A_L)       # (E, E) fixed
+
+        self.edge_gcn = nn.Sequential(
+            nn.Conv2d(edge_channels, edge_channels, 1),
+            nn.BatchNorm2d(edge_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        B = torch.zeros(num_nodes, E)
+        for k in range(E):
+            B[edge_src[k], k] = 1.0
+            B[edge_dst[k], k] = 1.0
+        self.register_buffer('incidence', B)
+        self.register_buffer('edge_src', edge_src)
+        self.register_buffer('edge_dst', edge_dst)
+        self.register_buffer('edge_degree', B.sum(1).clamp(min=1))
+
+    @staticmethod
+    def _build_line_graph(edge_src, edge_dst, E, num_nodes):
+        src = edge_src.tolist()
+        dst = edge_dst.tolist()
+        A_L = torch.zeros(E, E)
+        for v in range(num_nodes):
+            incident = [k for k in range(E) if src[k] == v or dst[k] == v]
+            for i in incident:
+                for j in incident:
+                    if i != j:
+                        A_L[i, j] = 1.0
+        degree = A_L.sum(1, keepdim=True).clamp(min=1)
+        return A_L / degree
+
+    def forward(self, x):
+        # x: (N, C, T, V)
+        xi = x[:, :, :, self.edge_src]                              # (N, C, T, E)
+        xj = x[:, :, :, self.edge_dst]
+        edge_in = torch.cat([0.5 * (xi + xj), torch.abs(xi - xj)], dim=1)  # (N, 2C, T, E)
+
+        e = self.edge_tcn(edge_in)                                   # (N, Ce, T, E)
+
+        e_agg = torch.einsum('ncte,fe->nctf', e, self.A_line)       # (N, Ce, T, E)
+        e = self.edge_gcn(e_agg) + e                                 # residual: 원래 edge feature 보존
+
+        x_edge = torch.einsum('ncte,ve->nctv', e, self.incidence)
+        x_edge = x_edge / self.edge_degree.view(1, 1, 1, -1)
+        return x_edge                                                # (N, Ce, T, V)
+
+
+class IMU_STGCN_EdgeGCN(nn.Module):
+    """Edge TCN → line-graph Edge GCN → node aggregate → concat → ST-GCN × 7"""
+
+    def __init__(self, in_channels, num_class, graph_args,
+                 edge_importance_weighting, dropout, edge_channels=8):
+        super().__init__()
+        self.in_channels = in_channels
+
+        self.graph = Graph(**graph_args)
+        A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
+        self.register_buffer('A', A)
+
+        V = A.size(1)
+        eye = torch.eye(V, dtype=torch.bool)
+        A_bool = (torch.tensor(self.graph.A).sum(0) > 0) & ~eye
+        triu = torch.triu(torch.ones(V, V, dtype=torch.bool), diagonal=1)
+        edge_mask = A_bool & triu
+        src, dst = edge_mask.nonzero(as_tuple=True)
+
+        self.edge_module = EdgeModule(
+            in_channels=in_channels,
+            edge_channels=edge_channels,
+            temporal_kernel_size=11,
+            edge_src=src, edge_dst=dst, num_nodes=V,
+        )
+
+        stem_ch = in_channels + edge_channels          # 3 + 8 = 11
+        spatial_kernel_size  = A.size(0)
+        temporal_kernel_size = 11
+        kernel_size = (temporal_kernel_size, spatial_kernel_size)
+        self.data_bn = nn.BatchNorm1d(stem_ch * V)
+
+        self.st_gcn_networks = nn.ModuleList((
+            st_gcn(stem_ch, 64,  kernel_size, 1, residual=False, dropout=0),
+            st_gcn(64,  64,  kernel_size, 1, dropout),
+            st_gcn(64,  64,  kernel_size, 1, dropout),
+            st_gcn(64,  128, kernel_size, 2, dropout),
+            st_gcn(128, 128, kernel_size, 1, dropout),
+            st_gcn(128, 128, kernel_size, 1, dropout),
+            st_gcn(128, 256, kernel_size, 2, dropout),
+        ))
+
+        if edge_importance_weighting:
+            self.edge_importance = nn.ParameterList([
+                nn.Parameter(torch.ones(self.A.size()))
+                for _ in self.st_gcn_networks
+            ])
+        else:
+            self.edge_importance = [1] * len(self.st_gcn_networks)
+
+        self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
+
+    def forward(self, x_IMU):
+        B, T, _ = x_IMU.shape
+        x = x_IMU.view(B, T, 10, self.in_channels).permute(0, 3, 1, 2).contiguous()
+
+        x_edge = self.edge_module(x)            # (N, Ce, T, V)
+        x = torch.cat([x, x_edge], dim=1)      # (N, C+Ce, T, V)
+
+        N, C, T_now, V = x.shape
+        x = x.permute(0, 3, 1, 2).contiguous().view(N, V * C, T_now)
+        x = self.data_bn(x)
+        x = x.view(N, V, C, T_now).permute(0, 2, 3, 1).contiguous()
+
+        for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
+            x, _ = gcn(x, self.A * importance)
+
+        x = F.avg_pool2d(x, x.size()[2:])
+        x = x.view(N, -1, 1, 1)
+        x = self.fcn(x)
+        x = x.view(x.size(0), -1)
+        return x
+
+
+#biLSTM 수정본
 import torch
 import torch.nn as nn
 

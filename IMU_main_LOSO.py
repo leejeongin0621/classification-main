@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
 from utils.Dataloader import LoadIMU_EPO_simple, LoadIMU_EPO_zaligned_fix_yaw, LoadIMU_EPO_zaligned_fix
+from utils.graph import compute_fold_A
 from scipy import io
 import random
 from tqdm import tqdm
@@ -23,6 +24,10 @@ print(device)
 subject_list = ['250805_KDY','250731_LGE','250806_LJI','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB']
 #left='250804_KTS','250805_SMC','250811_LPR','250811_JHS','250812_HHJ','250813_YMS','250814_CYJ','250819_CYK','250822_KTH', '250827_HJH'
 #right='250805_KDY','250731_LGE','250806_LJI','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB'
+
+model_pt_path  = os.path.join('models', 'Model_120.pt')
+run_tag        = 'LOSO_30ch_st-gcn_fstat_top20_right_model1'
+
 num_subject = len(subject_list)
 num_session = 5
 
@@ -43,14 +48,11 @@ model_path = os.path.join(path_sub_proj, 'models')
 os.makedirs(save_path, exist_ok=True)
 os.makedirs(model_path, exist_ok=True)
 
-max_epochs = 1100
-min_epochs = 1000
-patience   = 30
+max_epochs = 600
+min_epochs = 500
+patience   = 20
 batch_size = 128
 lr         = 1e-3
-
-model_pt_path = os.path.join('models', f"Model_95.pt")
-run_tag = f"LOSO_30ch_bilstm"
 
 base_seed = 2023
 
@@ -126,10 +128,15 @@ for test_idx, test_subj in enumerate(subject_list):
     val_loader   = DataLoader(test_ds,  batch_size=batch_size, shuffle=False)
 
     model = torch.load(model_pt_path, map_location=device, weights_only=False)
-    # 옛날에 저장된 모델 (in_channels 속성 없는 버전) 호환 패치
     if not hasattr(model, 'in_channels'):
-        model.in_channels = num_feat_per_sensor   # 3 (10 sensor × 3 axis = 30ch 입력 가정)
+        model.in_channels = num_feat_per_sensor
     model.to(device)
+
+    # fold별 F-statistic 그래프 계산 후 A 교체
+    A_fold = compute_fold_A(X_train, y_train, top_k=20).to(device)
+    model.A.data.copy_(A_fold)
+    for ei in model.edge_importance:
+        nn.init.ones_(ei)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
