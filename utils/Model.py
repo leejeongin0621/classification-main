@@ -381,22 +381,23 @@ class PureTCN(nn.Module):
 # Pure GCN (TCN 없음, 공간만)
 # ============================================================
 class _SpatialGCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, dropout=0.0):
+    def __init__(self, in_channels, out_channels, K=2, dropout=0.0):
         super().__init__()
-        self.fc   = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        self.bn   = nn.BatchNorm2d(out_channels)
-        self.act  = nn.ReLU(inplace=True)
+        self.K  = K
+        self.fc  = nn.Conv2d(in_channels, out_channels * K, kernel_size=1)
+        self.bn  = nn.BatchNorm2d(out_channels)
+        self.act = nn.ReLU(inplace=True)
         self.drop = nn.Dropout(dropout)
         self.res  = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x, A):
-        # x: (N, C, T, V)
-        A_agg = A.sum(0)          # (V, V)
+        # x: (B, C, T, V),  A: (K, V, V)
         res = self.res(x)
-        x = self.fc(x)            # (N, C_out, T, V)
-        x = x @ A_agg             # 이웃 집계
-        x = self.drop(self.act(self.bn(x) + res))
-        return x
+        x = self.fc(x)                              # (B, K*C_out, T, V)
+        B, KC, T, V = x.size()
+        x = x.view(B, self.K, KC // self.K, T, V)
+        x = torch.einsum('bkctv,kvw->bctw', x, A)  # partition별 별도 집계
+        return self.drop(self.act(self.bn(x) + res))
 
 
 class PureGCN(nn.Module):
@@ -415,9 +416,10 @@ class PureGCN(nn.Module):
 
         self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
 
+        K = A.size(0)
         dims = [in_channels] + list(hidden_dims)
         self.gcn_layers = nn.ModuleList([
-            _SpatialGCNBlock(dims[i], dims[i+1], dropout=(0.0 if i == 0 else dropout))
+            _SpatialGCNBlock(dims[i], dims[i+1], K=K, dropout=(0.0 if i == 0 else dropout))
             for i in range(len(dims) - 1)
         ])
         self.fcn = nn.Conv2d(hidden_dims[-1], num_class, kernel_size=1)
@@ -472,10 +474,11 @@ class IMU_DualBranch(nn.Module):
         self.register_buffer('A', A)
         V = A.size(1)
 
+        K = A.size(0)
         self.gcn_bn = nn.BatchNorm1d(in_channels * V)
         dims = [in_channels] + list(gcn_dims)
         self.gcn_layers = nn.ModuleList([
-            _SpatialGCNBlock(dims[i], dims[i+1], dropout=(0.0 if i == 0 else dropout))
+            _SpatialGCNBlock(dims[i], dims[i+1], K=K, dropout=(0.0 if i == 0 else dropout))
             for i in range(len(dims) - 1)
         ])
         if edge_importance_weighting:
