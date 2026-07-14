@@ -25,8 +25,8 @@ subject_list = ['250805_KDY','250731_LGE','260709_LJS','250812_WDY','250814_JCM'
 #left='250804_KTS','250805_SMC','250811_LPR','250811_JHS','250812_HHJ','250813_YMS','250814_CYJ','250819_CYK','260713_LSW', '250827_HJH'
 #right='250805_KDY','250731_LGE','260709_LJS','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB'
 
-model_pt_path  = os.path.join('models', 'Model_136.pt')
-run_tag        = 'LOSO_30ch_ST-GCN_model35'
+model_pt_path  = os.path.join('models', 'Model_140.pt')
+run_tag        = 'LOSO_30ch_ST-GCN_model40_analyze2'
 
 num_subject = len(subject_list)
 num_session = 5
@@ -157,8 +157,10 @@ for test_idx, test_subj in enumerate(subject_list):
         for X, y in train_loader:
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
-            logits = model(X)
-            loss = criterion(logits, y)
+            logits, gcn_logits, tcn_logits = model(X)
+            loss = (criterion(logits, y)
+                    + 0.2 * criterion(gcn_logits, y)
+                    + 0.2 * criterion(tcn_logits, y))
             loss.backward()
             optimizer.step()
 
@@ -175,7 +177,7 @@ for test_idx, test_subj in enumerate(subject_list):
         with torch.no_grad():
             for X, y in val_loader:
                 X, y = X.to(device), y.to(device)
-                logits = model(X)
+                logits, gcn_logits, tcn_logits = model(X)
                 loss = criterion(logits, y)
                 va_loss    += loss.item() * X.size(0)
                 va_correct += logits.argmax(1).eq(y).sum().item()

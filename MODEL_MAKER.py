@@ -2,7 +2,7 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import torch
-from utils.Model import PureTCN, PureGCN, IMU_Conformer, IMU_ConformerBiLSTM, IMU_Transformer,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM,IMU_GASTNet,IMU_DualBranch
+from utils.Model import PureTCN, PureGCN, IMU_Conformer, IMU_ConformerBiLSTM, IMU_Transformer,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM,IMU_GASTNet,IMU_DualBranch,IMU_GateFusion
 from os import path
 from pathlib import Path
 
@@ -102,22 +102,31 @@ k=0
 #     tpp_scales=(1, 2, 4),
 # ).to(device)
 
-# ── 137: IMU_DualBranch (GCN branch 7겹 + TCN branch 7겹 병렬 → concat → FC)
-model = IMU_DualBranch(
+# ── 136: IMU_DualBranch (GCN branch 7겹 + TCN branch 7겹 병렬 → cross-attn → FC)
+# model = IMU_DualBranch(
+#     in_channels=3,
+#     num_class=100,
+#     graph_args={'max_hop': 1, 'dilation': 1},
+#     gcn_dims=(64, 64, 64, 128, 128, 128, 256),
+#     tcn_hidden=128,
+#     tcn_kernel=11,
+#     edge_importance_weighting=True,
+#     num_heads=4,
+#     dropout=0.2,
+# ).to(device)
+
+# ── 138: IMU_GateFusion (SharedLocalCNN → GCN+TCN → BranchGate → FusionFC)
+model = IMU_GateFusion(
     in_channels=3,
     num_class=100,
+    num_sensor=10,
     graph_args={'max_hop': 1, 'dilation': 1},
-    gcn_dims=(64, 64, 64, 128, 128, 128, 256),
-    tcn_hidden=128,
-    tcn_kernel=11,
-    edge_importance_weighting=True,
-    num_heads=4,
     dropout=0.2,
 ).to(device)
 
 # 모델 전체 저장
 Path("models").mkdir(exist_ok=True)
-model_num = 136
+model_num = 140
 save_path = f"./models/Model_{model_num}.pt"
 
 
@@ -139,7 +148,7 @@ else:
 # 모델 전체 불러오기
 import torch
 
-model_num = 136
+model_num = 140
 
 save_path = "./models/Model_{}.pt".format(model_num)
 model_loaded = torch.load(save_path, weights_only=False, map_location=device)

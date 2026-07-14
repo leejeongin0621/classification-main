@@ -546,6 +546,136 @@ class IMU_DualBranch(nn.Module):
         return self.fcn(self.drop(z))
 
 
+# ============================================================
+# IMU_GateFusion : SharedLocalCNN → GCN branch + TCN branch
+#                  → concat → fusion FC → 100 classes
+# ============================================================
+class IMU_GateFusion(nn.Module):
+    """
+    (B,200,30) → Shared LocalCNN (sensor-wise, stride=2) → (B,64,10,100)
+        GCN branch : _SpatialGCNBlock x3 → node-attn pool → BiLSTM(128,64,bidir) → mean+max → (B,256)
+        TCN branch : flatten C*V → Conv1d(640,64,1) → Conv1d x3 (k=7,9,11) → mean+max → (B,256)
+    concat (B,512) → fusion FC (512→256→100)
+    Always returns (main_logits, gcn_logits, tcn_logits).
+    Loss = main + 0.2*gcn + 0.2*tcn
+    """
+    def __init__(self, in_channels=3, num_class=100, num_sensor=10,
+                 graph_args=None, dropout=0.2):
+        super().__init__()
+        self.in_channels = in_channels
+        self.num_sensor  = num_sensor
+
+        # ── Graph ──
+        if graph_args is None:
+            graph_args = {'max_hop': 1, 'dilation': 1}
+        self.graph = Graph(**graph_args)
+        A = torch.tensor(self.graph.A, dtype=torch.float32)
+        self.register_buffer('A', A)
+        K = int(A.size(0))
+
+        # ── Shared sensor-wise local CNN ──
+        # (B, 3, 10, 200) → (B, 64, 10, 100)
+        self.local_cnn = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=(1, 5), stride=(1, 2), padding=(0, 2)),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+
+        # ── GCN branch (5 layers) ──
+        self.gcn_layers = nn.ModuleList([
+            _SpatialGCNBlock(64,  64,  K=K, dropout=dropout),
+            _SpatialGCNBlock(64,  64,  K=K, dropout=dropout),
+            _SpatialGCNBlock(64,  96,  K=K, dropout=dropout),
+            _SpatialGCNBlock(96,  96,  K=K, dropout=dropout),
+            _SpatialGCNBlock(96,  128, K=K, dropout=dropout),
+        ])
+        self.edge_importance = nn.ParameterList([
+            nn.Parameter(torch.ones(A.size())) for _ in self.gcn_layers
+        ])
+
+        self.node_attn  = nn.Linear(128, 1)
+        self.gcn_bilstm = nn.LSTM(128, 64, batch_first=True, bidirectional=True)
+
+        # ── TCN branch (5 layers, kernels 7,7,9,9,11) ──
+        self.tcn_proj = nn.Conv1d(64 * num_sensor, 64, kernel_size=1)
+        self.tcn = nn.Sequential(               # (B,64,100) → (B,128,50)
+            nn.Conv1d(64,  128, kernel_size=7,  padding=3),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, 128, kernel_size=7,  padding=3),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, 128, kernel_size=9,  padding=4),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, 128, kernel_size=9,  padding=4),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, 128, kernel_size=11, stride=2, padding=5),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+        )
+        # ── Pooling & norm ──  branch 출력: 64*2=128 → mean+max=256
+        self.gcn_ln = nn.LayerNorm(256)
+        self.tcn_ln = nn.LayerNorm(256)
+
+        # ── Auxiliary classifiers ──
+        self.gcn_aux = nn.Linear(256, num_class)
+        self.tcn_aux = nn.Linear(256, num_class)
+
+        # ── Branch gate: (B,512) → α_g, α_t ──
+        # ── Fusion classifier ──
+        self.fusion_fc = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(256, num_class),
+        )
+
+    def _mean_max(self, x):
+        # x: (B, T, C) → (B, 2C)
+        return torch.cat([x.mean(dim=1), x.max(dim=1).values], dim=1)
+
+    def forward(self, x_IMU):
+        B, T, D = x_IMU.shape
+
+        # (B,200,30) → (B,3,10,200)
+        x = x_IMU.view(B, T, self.num_sensor, self.in_channels)
+        x = x.permute(0, 3, 2, 1).contiguous()
+
+        # Shared local CNN → (B,64,10,100)
+        x = self.local_cnn(x)
+
+        # ── GCN branch ──
+        xg = x.permute(0, 1, 3, 2).contiguous()       # (B,64,100,10) = (B,C,T,V)
+        for gcn, imp in zip(self.gcn_layers, self.edge_importance):
+            xg = gcn(xg, self.A * imp)                 # (B,C,100,10)
+
+        # Node attention pooling over V=10
+        xg_t = xg.permute(0, 2, 3, 1)                 # (B,T,V,C)
+        score = torch.softmax(self.node_attn(xg_t), dim=2)    # (B,T,V,1)
+        xg = (xg_t * score).sum(dim=2).permute(0, 2, 1)       # (B,C=128,T=100)
+
+        xg, _ = self.gcn_bilstm(xg.permute(0, 2, 1))  # (B,100,128)
+        h_g = self.gcn_ln(self._mean_max(xg))          # (B,256)
+
+        # ── TCN branch ──
+        xt = x.reshape(B, -1, x.shape[-1])      # (B, 640, 100) — flatten C×V
+        xt = self.tcn_proj(xt)                   # (B, 64, 100)
+        xt = self.tcn(xt)                        # (B,128,50)
+        h_t = self.tcn_ln(self._mean_max(xt.permute(0, 2, 1)))    # (B,256)
+
+        # ── Auxiliary logits ──
+        gcn_logits = self.gcn_aux(h_g)
+        tcn_logits = self.tcn_aux(h_t)
+
+        fused = torch.cat([h_g, h_t], dim=1)   # (B,512)
+        main_logits = self.fusion_fc(fused)
+
+        return main_logits, gcn_logits, tcn_logits
+
+
 #biLSTM 수정본
 import torch
 import torch.nn as nn
