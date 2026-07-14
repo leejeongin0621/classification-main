@@ -8,8 +8,7 @@ import os
 from scipy import io
 import random
 from tqdm import tqdm
-from correlation import make_sample_corr, make_word_avg_corr, make_word_corr_dict
-from utils.graph import Graph, make_laplacian_pe
+from utils.graph import Graph
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -144,7 +143,7 @@ for model_num in model_list:
             torch.cuda.manual_seed_all(seed)
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.enabled = False
+            # torch.backends.cudnn.enabled = False
             print(f"- fold {fold} -")
 
             test_session  = np.array([fold])
@@ -173,7 +172,7 @@ for model_num in model_list:
             val_loader = DataLoader(val_dataset, batch_size=50, shuffle=False)
 
             # -------- Load IMU model --------
-            model = torch.load(os.path.join(model_path, f"Model_88.pt"),
+            model = torch.load(os.path.join(model_path, f"Model_130.pt"),
                                map_location=device,weights_only=False)  # PyTorch 2.6 대응
 
             model.to(device)

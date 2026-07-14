@@ -57,17 +57,13 @@ def LoadIMU_EPO_simple(load_path, subject_list, num_session=5, num_class=100, ep
 
     return data, label
 
-#채널별로 센서 보정 
 
 def _load_fix_matrix(fix_path):
     mat = io.loadmat(fix_path, squeeze_me=True)
-    return mat['ans'].astype(np.float32)  # (30, 30)
+    return mat['ans'].astype(np.float32)
 
 def _apply_fix(x, fix):
-    """채널 순서 보정: (num_class, 200, 30) @ (30, 30)"""
     return (x.astype(np.float64) @ fix.T).astype(x.dtype)
-
-
 
 # ============================================================
 # (private) z-정렬 / yaw 회전 헬퍼 — 아래 loader 들이 사용
@@ -108,6 +104,7 @@ def _yaw_rotate_one_trial(trial, num_sensor, d_range, rng):
                       [ 0, 0, 1]], dtype=trial.dtype)
         out[:, 3*i:3*(i+1)] = trial[:, 3*i:3*(i+1)] @ R
     return out
+
 
 def LoadIMU_EPO_zaligned_fix(load_path, subject_list, num_session=5, num_class=100,
                               num_sensor=10, eps=1e-8):
@@ -166,7 +163,7 @@ def LoadIMU_EPO_zaligned_fix_yaw(load_path, subject_list, num_session=5, num_cla
             x = np.asarray(mat["epo"].x)
             x = np.transpose(x, (2, 0, 1)).astype(np.float32)
 
-            # 1) 채널 순서 보정
+            # 1) 채널 순서 보정 (피험자별 fix 행렬 적용)
             for c in range(num_class):
                 x[c] = _apply_fix(x[c], fix)
 

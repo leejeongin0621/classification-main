@@ -21,12 +21,12 @@ print(device)
 # =========================
 # Settings
 # =========================
-subject_list = ['250805_KDY','250731_LGE','250806_LJI','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB']
-#left='250804_KTS','250805_SMC','250811_LPR','250811_JHS','250812_HHJ','250813_YMS','250814_CYJ','250819_CYK','250822_KTH', '250827_HJH'
-#right='250805_KDY','250731_LGE','250806_LJI','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB'
+subject_list = ['250805_KDY','250731_LGE','260709_LJS','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB']
+#left='250804_KTS','250805_SMC','250811_LPR','250811_JHS','250812_HHJ','250813_YMS','250814_CYJ','250819_CYK','260713_LSW', '250827_HJH'
+#right='250805_KDY','250731_LGE','260709_LJS','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB'
 
-model_pt_path  = os.path.join('models', 'Model_120.pt')
-run_tag        = 'LOSO_30ch_st-gcn_fstat_top20_right_model1'
+model_pt_path  = os.path.join('models', 'Model_136.pt')
+run_tag        = 'LOSO_30ch_ST-GCN_model35'
 
 num_subject = len(subject_list)
 num_session = 5
@@ -82,7 +82,7 @@ for test_idx, test_subj in enumerate(subject_list):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.enabled = False
+    # torch.backends.cudnn.enabled = False
 
     # ---- split + train-only augmentation ----
     train_subjects = [s for i, s in enumerate(subject_list) if i != test_idx]
@@ -132,7 +132,7 @@ for test_idx, test_subj in enumerate(subject_list):
         model.in_channels = num_feat_per_sensor
     model.to(device)
 
-    # fold별 F-statistic 그래프 계산 후 A 교체
+    #fold별 F-statistic 그래프 계산 후 A 교체
     A_fold = compute_fold_A(X_train, y_train, top_k=20).to(device)
     model.A.data.copy_(A_fold)
     for ei in model.edge_importance:

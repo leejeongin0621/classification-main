@@ -2,7 +2,7 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import torch
-from utils.Model import IMU_Transformer,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM,IMU_STGCN_EdgeGCN
+from utils.Model import PureTCN, PureGCN, IMU_Conformer, IMU_ConformerBiLSTM, IMU_Transformer,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM,IMU_GASTNet,IMU_DualBranch
 from os import path
 from pathlib import Path
 
@@ -36,15 +36,6 @@ k=0
 #     dropout=gap_dropout,
 # ).to(device)
 
-model = IMU_STGCN_EdgeGCN(
-    num_class=num_classes,
-    in_channels=3,
-    graph_args={'max_hop': 1, 'dilation': 1},
-    edge_importance_weighting=True,
-    dropout=gap_dropout,
-).to(device)
-
-
 # model = BiLSTM(
 #     num_classes=num_classes,
 #     nCh=nCh,              # 30
@@ -54,11 +45,6 @@ model = IMU_STGCN_EdgeGCN(
 #     gap_dropout=0.5,
 # ).to(device)
 
-# model = EMG_IMU_BiLSTM(
-#     num_classes=num_classes,
-#     num_layers=num_layers,
-#     hidden_dim=hidden_dim
-# ).to(device)
 
 # model = IMU_Transformer(
 #     num_classes=num_classes,
@@ -67,9 +53,71 @@ model = IMU_STGCN_EdgeGCN(
 #     nhead=nhead
 # ).to(device)
 
+# model = IMU_ConformerBiLSTM(
+#     num_classes=100,
+#     d_model=128,
+#     nhead=4,
+#     num_conformer_layers=4,   
+#     ff_dim=512,
+#     conv_kernel_size=31,
+#     dropout=0.1,
+# ).to(device)
+
+
+# ── 133: PureTCN ──────────────────────────────────────────────
+# model = PureTCN(
+#     num_classes=100,
+#     in_channels=30,
+#     hidden_dim=128,
+#     num_layers=7,
+#     kernel_size=11,
+#     dropout=0.2,
+# ).to(device)
+
+#── 134: PureGCN ──────────────────────────────────────────────
+# model = PureGCN(
+#     in_channels=3,
+#     num_class=100,
+#     graph_args={'max_hop': 1, 'dilation': 1},
+#     hidden_dims=(64, 64, 64, 128, 128, 128, 256),
+#     dropout=0.2,
+# ).to(device)
+
+# ── 135: IMU_GASTNet (GAST-Net 스타일: TCN↔GAttn 교차, Local F-stat + Global Bk)
+# model = IMU_GASTNet(
+#     in_channels=3,
+#     num_class=100,
+#     graph_args={'max_hop': 1, 'dilation': 1},
+#     edge_importance_weighting=True,
+#     dropout=0.2,
+# ).to(device)
+
+# ── 136: IMU_STGCN_TPP (ST-GCN + Temporal Pyramid Pooling, scales=[1,2,4])
+# model = IMU_STGCN_TPP(
+#     in_channels=3,
+#     num_class=100,
+#     graph_args={'max_hop': 1, 'dilation': 1},
+#     edge_importance_weighting=True,
+#     dropout=0.2,
+#     tpp_scales=(1, 2, 4),
+# ).to(device)
+
+# ── 137: IMU_DualBranch (GCN branch 7겹 + TCN branch 7겹 병렬 → concat → FC)
+model = IMU_DualBranch(
+    in_channels=3,
+    num_class=100,
+    graph_args={'max_hop': 1, 'dilation': 1},
+    gcn_dims=(64, 64, 64, 128, 128, 128, 256),
+    tcn_hidden=128,
+    tcn_kernel=11,
+    edge_importance_weighting=True,
+    num_heads=4,
+    dropout=0.2,
+).to(device)
+
 # 모델 전체 저장
 Path("models").mkdir(exist_ok=True)
-model_num = 120 
+model_num = 136
 save_path = f"./models/Model_{model_num}.pt"
 
 
@@ -91,7 +139,7 @@ else:
 # 모델 전체 불러오기
 import torch
 
-model_num = 120 
+model_num = 136
 
 save_path = "./models/Model_{}.pt".format(model_num)
 model_loaded = torch.load(save_path, weights_only=False, map_location=device)
@@ -102,4 +150,6 @@ print(model_loaded)
 #101 : IMU_STGCN (edge importance top20 기반 graph) #102 : left graph #103 : edge importance 기반 그래프 # 104: ?이거 그냥 fc 다시 한거 # 105 : 섞은거 #106 : fully connected graph #107 :separability 
 #108 : 17개 edge로 바꿈-이게 제일 나옴 #109 : left graph(15) #110 : right (15) #111 : RIGHT KERENEL SIZE 9 #112 : RIGHT SEPARABILITY BASED 13개 +2개  #113 모델 구조 depthwise/mutiscale #114 multiscale+max_hop2 
 # #115 ms_stgcn (k=3∥k=11 multi-scale TCN)/gatedtcn/gcn3겹+tcn7겹 #116 gcn 3겹 +tcn 5겹 #117 gated tcn/ 지금은 edge feature 이용한거 symmetric하지 않는거 #118 edge feature 이용한 symmetric한거 #119 edge TCN + line-graph 
-# 120 : 119 수정본 
+# 120 : 119 수정본 ### 122 : LOG로 WEIGHTED GRAPH 만들어줌 
+# #123 : linear weighted graph (top20 edge) #124 : 첫단꺼 residual 반영(잘 안나옴) #125 : tcn->gcn-> tcn #126 #127 : bilstm(lr=0.0005 돌린거 ) #128 : dropout 비율을 달리해봄 
+#131 : Conformer+bilstm

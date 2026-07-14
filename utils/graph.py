@@ -193,12 +193,20 @@ def compute_fold_A(X_train_np, y_train_np, top_k=20, max_hop=1):
     all_links = [(i, i) for i in range(num_node)] + selected #self-loop +선택된 엣지
     hop_dis   = get_hop_distance(num_node, all_links, max_hop=max_hop)
 
-    # max_hop 이내 모든 연결 포함하여 정규화
+    # # log 압축 가중치 버전
+    w_min = 0.3
+    f_vals = np.array([F_map.get(e, F_map.get((e[1], e[0]), 0.0)) for e in selected])
+    log_f = np.log(f_vals + 1)
+    lo, hi = log_f.min(), log_f.max()
+    w_norm = (log_f - lo) / (hi - lo + 1e-8)
+    w_edge = w_min + (1 - w_min) * w_norm
+
     adj_full = np.zeros((num_node, num_node))
+    for k, (i, j) in enumerate(selected):
+        adj_full[i, j] = w_edge[k]
+        adj_full[j, i] = w_edge[k]
     for i in range(num_node):
-        for j in range(num_node):
-            if hop_dis[i, j] <= max_hop:
-                adj_full[i, j] = 1
+        adj_full[i, i] = 1.0
     norm_adj = normalize_digraph(adj_full)
 
     A = np.zeros((max_hop + 1, num_node, num_node))
@@ -208,28 +216,4 @@ def compute_fold_A(X_train_np, y_train_np, top_k=20, max_hop=1):
     return torch.tensor(A, dtype=torch.float32)
 
 
-def make_laplacian_pe(A, k=2, use_abs=True):
-    """
-    A: (V, V) adjacency matrix
-    k: 사용할 eigenvector 개수
-    return: (V, k)
-    """
-    A = np.asarray(A, dtype=np.float32)
 
-    # degree matrix
-    D = np.diag(A.sum(axis=1))
-
-    # graph Laplacian
-    L = D - A
-
-    # eigen decomposition
-    eigvals, eigvecs = np.linalg.eigh(L)
-
-    # 첫 번째 eigenvector 제외하고 두 번째부터 사용
-    pe = eigvecs[:, 1:k+1]
-
-    # sign ambiguity 완화
-    if use_abs:
-        pe = np.abs(pe)
-
-    return pe.astype(np.float32)

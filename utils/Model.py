@@ -184,143 +184,360 @@ class st_gcn(nn.Module):
         return self.relu(x), A
 
 
-class EdgeModule(nn.Module):
-    """[mean, |diff|] → Edge TCN → line-graph Edge GCN → node aggregate"""
+# ============================================================
+# GAST-Net 스타일 IMU 분류 모델
+# TCN block (시간만) + Graph Attn block (공간만) 교차 배치
+# ============================================================
 
-    def __init__(self, in_channels, edge_channels, temporal_kernel_size,
-                 edge_src, edge_dst, num_nodes):
+class _TemporalBlock(nn.Module):
+    """순수 시간 방향 Conv: kernel (k,1) — 센서 간 관계 무관"""
+    def __init__(self, in_ch, out_ch, kernel_size=9, stride=1, dropout=0.2):
         super().__init__()
-        E = edge_src.shape[0]
-        padding = (temporal_kernel_size - 1) // 2
-
-        self.edge_tcn = nn.Sequential(
-            nn.Conv2d(in_channels * 2, edge_channels,
-                      kernel_size=(temporal_kernel_size, 1),
-                      padding=(padding, 0), bias=False),
-            nn.BatchNorm2d(edge_channels),
+        pad = (kernel_size - 1) // 2
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, (kernel_size, 1), stride=(stride, 1), padding=(pad, 0)),
+            nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Conv2d(out_ch, out_ch, 1),
+            nn.BatchNorm2d(out_ch),
         )
-
-        A_L = self._build_line_graph(edge_src, edge_dst, E, num_nodes)
-        self.register_buffer('A_line', A_L)       # (E, E) fixed
-
-        self.edge_gcn = nn.Sequential(
-            nn.Conv2d(edge_channels, edge_channels, 1),
-            nn.BatchNorm2d(edge_channels),
-            nn.ReLU(inplace=True),
-        )
-
-        B = torch.zeros(num_nodes, E)
-        for k in range(E):
-            B[edge_src[k], k] = 1.0
-            B[edge_dst[k], k] = 1.0
-        self.register_buffer('incidence', B)
-        self.register_buffer('edge_src', edge_src)
-        self.register_buffer('edge_dst', edge_dst)
-        self.register_buffer('edge_degree', B.sum(1).clamp(min=1))
-
-    @staticmethod
-    def _build_line_graph(edge_src, edge_dst, E, num_nodes):
-        src = edge_src.tolist()
-        dst = edge_dst.tolist()
-        A_L = torch.zeros(E, E)
-        for v in range(num_nodes):
-            incident = [k for k in range(E) if src[k] == v or dst[k] == v]
-            for i in incident:
-                for j in incident:
-                    if i != j:
-                        A_L[i, j] = 1.0
-        degree = A_L.sum(1, keepdim=True).clamp(min=1)
-        return A_L / degree
+        self.res  = (nn.Sequential(nn.Conv2d(in_ch, out_ch, 1, stride=(stride, 1)),
+                                   nn.BatchNorm2d(out_ch))
+                     if in_ch != out_ch or stride != 1 else nn.Identity())
+        self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        # x: (N, C, T, V)
-        xi = x[:, :, :, self.edge_src]                              # (N, C, T, E)
-        xj = x[:, :, :, self.edge_dst]
-        edge_in = torch.cat([0.5 * (xi + xj), torch.abs(xi - xj)], dim=1)  # (N, 2C, T, E)
-
-        e = self.edge_tcn(edge_in)                                   # (N, Ce, T, E)
-
-        e_agg = torch.einsum('ncte,fe->nctf', e, self.A_line)       # (N, Ce, T, E)
-        e = self.edge_gcn(e_agg) + e                                 # residual: 원래 edge feature 보존
-
-        x_edge = torch.einsum('ncte,ve->nctv', e, self.incidence)
-        x_edge = x_edge / self.edge_degree.view(1, 1, 1, -1)
-        return x_edge                                                # (N, Ce, T, V)
+        return self.relu(self.net(x) + self.res(x))
 
 
-class IMU_STGCN_EdgeGCN(nn.Module):
-    """Edge TCN → line-graph Edge GCN → node aggregate → concat → ST-GCN × 7"""
-
-    def __init__(self, in_channels, num_class, graph_args,
-                 edge_importance_weighting, dropout, edge_channels=8):
+class _GraphAttnBlock(nn.Module):
+    """Local GCN (F-stat 그래프) + Global Bk attention 병렬 → concat
+       시간 방향은 건드리지 않음 (공간 처리 전용)
+    """
+    def __init__(self, in_ch, out_ch):
         super().__init__()
+        half = out_ch // 2
+        dk   = max(in_ch // 4, 1)
+
+        # Local branch: F-stat adjacency 기반 GCN
+        self.local_conv = nn.Conv2d(in_ch, half, 1)
+        self.local_bn   = nn.BatchNorm2d(half)
+
+        # Global branch: Bk attention (입력 기반 동적 adjacency)
+        self.dk         = dk
+        self.theta      = nn.Conv1d(in_ch, dk, 1)
+        self.phi        = nn.Conv1d(in_ch, dk, 1)
+        self.global_conv = nn.Conv2d(in_ch, half, 1)
+        self.global_bn   = nn.BatchNorm2d(half)
+
+        self.out_bn = nn.BatchNorm2d(out_ch)
+        self.res    = (nn.Sequential(nn.Conv2d(in_ch, out_ch, 1), nn.BatchNorm2d(out_ch))
+                       if in_ch != out_ch else nn.Identity())
+        self.relu   = nn.ReLU(inplace=True)
+
+    def forward(self, x, A):
+        # x: (B, C, T, V),  A: (K, V, V)
+        res = self.res(x)
+
+        # A: (K,V,V) → 합산해서 (V,V)
+        A_sum = A.sum(0)  # (V, V)
+
+        # Local: 이웃 집계 → conv
+        x_loc = torch.einsum('vw,bctw->bctv', A_sum, x)
+        x_loc = self.local_bn(self.local_conv(x_loc))    # (B, half, T, V)
+
+        # Global: Bk attention
+        xv    = x.mean(dim=2)                            # (B, C, V)  temporal avg
+        theta = self.theta(xv)                           # (B, dk, V)
+        phi   = self.phi(xv)                             # (B, dk, V)
+        attn  = torch.einsum('bdi,bdj->bij', theta, phi) / math.sqrt(self.dk)
+        attn  = F.softmax(attn, dim=-1)                  # (B, V, V)
+        x_glo = torch.einsum('bij,bctj->bcti', attn, x) # (B, C, T, V)
+        x_glo = self.global_bn(self.global_conv(x_glo)) # (B, half, T, V)
+
+        out = torch.cat([x_loc, x_glo], dim=1)          # (B, out_ch, T, V)
+        return self.relu(self.out_bn(out) + res)
+
+
+class IMU_GASTNet(nn.Module):
+    """
+    GAST-Net 스타일 IMU 100클래스 분류 모델
+    구조: TCN → GAttn → TCN → GAttn → TCN → GAttn → GAP → FC
+
+    TCN block : 시간 방향만 처리 (stride로 T 축소)
+    GAttn block: 공간 방향만 처리 (Local F-stat 그래프 + Global Bk attention)
+    """
+    def __init__(self, in_channels, num_class, graph_args,
+                 edge_importance_weighting=True, dropout=0.2):
+        super().__init__()
+        self.in_channels = in_channels
+        V = 10
+
+        self.graph = Graph(**graph_args)
+        A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
+        self.register_buffer('A', A)
+
+        self.data_bn = nn.BatchNorm1d(in_channels * V)
+
+        # TCN blocks (시간 처리)                  in  out  stride  T 변화
+        self.tcn1 = _TemporalBlock( in_channels,  64, stride=1, dropout=dropout)  # 200→200
+        self.tcn2 = _TemporalBlock(128, 128,       stride=2, dropout=dropout)      # 200→100
+        self.tcn3 = _TemporalBlock(256, 256,       stride=2, dropout=dropout)      # 100→50
+
+        # Graph Attention blocks (공간 처리)       in   out
+        self.gattn1 = _GraphAttnBlock( 64, 128)   # 64→128
+        self.gattn2 = _GraphAttnBlock(128, 256)   # 128→256
+        self.gattn3 = _GraphAttnBlock(256, 256)   # 256→256
+
+        if edge_importance_weighting:
+            self.edge_importance = nn.ParameterList([
+                nn.Parameter(torch.ones(A.size())) for _ in range(3)
+            ])
+        else:
+            self.edge_importance = [1, 1, 1]
+
+        self.fcn  = nn.Linear(256, num_class)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x_IMU):
+        B, T, D = x_IMU.shape
+        V = 10
+
+        # (B, T, 30) → (B, C, T, V)
+        x = x_IMU.view(B, T, V, self.in_channels).permute(0, 3, 1, 2).contiguous()
+
+        # BatchNorm: (B, C*V, T)
+        x = x.permute(0, 1, 3, 2).contiguous().view(B, self.in_channels * V, T)
+        x = self.data_bn(x)
+        x = x.view(B, self.in_channels, V, T).permute(0, 1, 3, 2).contiguous()  # (B, C, T, V)
+
+        # Block 1: TCN → GAttn
+        x = self.tcn1(x)
+        x = self.gattn1(x, self.A * self.edge_importance[0])
+
+        # Block 2: TCN → GAttn
+        x = self.tcn2(x)
+        x = self.gattn2(x, self.A * self.edge_importance[1])
+
+        # Block 3: TCN → GAttn
+        x = self.tcn3(x)
+        x = self.gattn3(x, self.A * self.edge_importance[2])
+
+        # GAP over (T, V) → (B, 256)
+        x = x.mean(dim=[2, 3])
+        x = self.drop(x)
+        x = self.fcn(x)
+        return x
+
+
+# ============================================================
+# Pure TCN (그래프 없음, 시간만)
+# ============================================================
+class _TCNResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=11, stride=1, dropout=0.2):
+        super().__init__()
+        padding = (kernel_size - 1) // 2
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size,
+                              stride=stride, padding=padding)
+        self.bn   = nn.BatchNorm1d(out_channels)
+        self.act  = nn.ReLU(inplace=True)
+        self.drop = nn.Dropout(dropout)
+        if in_channels != out_channels or stride != 1:
+            self.res = nn.Conv1d(in_channels, out_channels, 1, stride=stride)
+        else:
+            self.res = nn.Identity()
+
+    def forward(self, x):
+        return self.act(self.bn(self.drop(self.conv(x))) + self.res(x))
+
+
+class PureTCN(nn.Module):
+    """7겹 TCN. 입력 (N, T, 30). 그래프 없음.
+    stride=2 를 3회(layer 0,2,4) 사용 → 200→100→50→25 후 GAP."""
+    def __init__(self, num_classes=100, in_channels=30, hidden_dim=128,
+                 num_layers=7, kernel_size=11, dropout=0.2):
+        super().__init__()
+        layers = []
+        for i in range(num_layers):
+            in_ch  = in_channels if i == 0 else hidden_dim
+            stride = 2 if i in (0, 2, 4) else 1
+            layers.append(_TCNResBlock(in_ch, hidden_dim, kernel_size, stride=stride, dropout=dropout))
+        self.net  = nn.Sequential(*layers)
+        self.drop = nn.Dropout(dropout)
+        self.fc   = nn.Linear(hidden_dim, num_classes)
+
+    def forward(self, x):
+        x = x.transpose(1, 2)      # (N, 30, T)
+        x = self.net(x)             # (N, hidden, ~25)
+        x = x.mean(dim=2)          # GAP
+        return self.fc(self.drop(x))
+
+
+# ============================================================
+# Pure GCN (TCN 없음, 공간만)
+# ============================================================
+class _SpatialGCNBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, dropout=0.0):
+        super().__init__()
+        self.fc   = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.bn   = nn.BatchNorm2d(out_channels)
+        self.act  = nn.ReLU(inplace=True)
+        self.drop = nn.Dropout(dropout)
+        self.res  = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x, A):
+        # x: (N, C, T, V)
+        A_agg = A.sum(0)          # (V, V)
+        res = self.res(x)
+        x = self.fc(x)            # (N, C_out, T, V)
+        x = x @ A_agg             # 이웃 집계
+        x = self.drop(self.act(self.bn(x) + res))
+        return x
+
+
+class PureGCN(nn.Module):
+    """Pure spatial GCN. 시간축 처리 없음 — GCN 후 T·V 방향 GAP.
+    입력 (N, T, 30). 그래프 구조만 학습."""
+    def __init__(self, in_channels=3, num_class=100,
+                 graph_args=None, hidden_dims=(64, 64, 64, 128, 128, 128, 256), dropout=0.2):
+        super().__init__()
+        if graph_args is None:
+            graph_args = {'max_hop': 1, 'dilation': 1}
         self.in_channels = in_channels
 
         self.graph = Graph(**graph_args)
         A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
         self.register_buffer('A', A)
 
-        V = A.size(1)
-        eye = torch.eye(V, dtype=torch.bool)
-        A_bool = (torch.tensor(self.graph.A).sum(0) > 0) & ~eye
-        triu = torch.triu(torch.ones(V, V, dtype=torch.bool), diagonal=1)
-        edge_mask = A_bool & triu
-        src, dst = edge_mask.nonzero(as_tuple=True)
+        self.data_bn = nn.BatchNorm1d(in_channels * A.size(1))
 
-        self.edge_module = EdgeModule(
-            in_channels=in_channels,
-            edge_channels=edge_channels,
-            temporal_kernel_size=11,
-            edge_src=src, edge_dst=dst, num_nodes=V,
-        )
-
-        stem_ch = in_channels + edge_channels          # 3 + 8 = 11
-        spatial_kernel_size  = A.size(0)
-        temporal_kernel_size = 11
-        kernel_size = (temporal_kernel_size, spatial_kernel_size)
-        self.data_bn = nn.BatchNorm1d(stem_ch * V)
-
-        self.st_gcn_networks = nn.ModuleList((
-            st_gcn(stem_ch, 64,  kernel_size, 1, residual=False, dropout=0),
-            st_gcn(64,  64,  kernel_size, 1, dropout),
-            st_gcn(64,  64,  kernel_size, 1, dropout),
-            st_gcn(64,  128, kernel_size, 2, dropout),
-            st_gcn(128, 128, kernel_size, 1, dropout),
-            st_gcn(128, 128, kernel_size, 1, dropout),
-            st_gcn(128, 256, kernel_size, 2, dropout),
-        ))
-
-        if edge_importance_weighting:
-            self.edge_importance = nn.ParameterList([
-                nn.Parameter(torch.ones(self.A.size()))
-                for _ in self.st_gcn_networks
-            ])
-        else:
-            self.edge_importance = [1] * len(self.st_gcn_networks)
-
-        self.fcn = nn.Conv2d(256, num_class, kernel_size=1)
+        dims = [in_channels] + list(hidden_dims)
+        self.gcn_layers = nn.ModuleList([
+            _SpatialGCNBlock(dims[i], dims[i+1], dropout=(0.0 if i == 0 else dropout))
+            for i in range(len(dims) - 1)
+        ])
+        self.fcn = nn.Conv2d(hidden_dims[-1], num_class, kernel_size=1)
 
     def forward(self, x_IMU):
-        B, T, _ = x_IMU.shape
-        x = x_IMU.view(B, T, 10, self.in_channels).permute(0, 3, 1, 2).contiguous()
+        B, T, D = x_IMU.shape
+        x = x_IMU.view(B, T, 10, self.in_channels)
+        x = x.permute(0, 3, 1, 2).contiguous().unsqueeze(-1)
 
-        x_edge = self.edge_module(x)            # (N, Ce, T, V)
-        x = torch.cat([x, x_edge], dim=1)      # (N, C+Ce, T, V)
-
-        N, C, T_now, V = x.shape
-        x = x.permute(0, 3, 1, 2).contiguous().view(N, V * C, T_now)
+        N, C, T, V, M = x.size()
+        x = x.permute(0, 4, 3, 1, 2).contiguous().view(N * M, V * C, T)
         x = self.data_bn(x)
-        x = x.view(N, V, C, T_now).permute(0, 2, 3, 1).contiguous()
+        x = x.view(N, M, V, C, T).permute(0, 1, 3, 4, 2).contiguous()
+        x = x.view(N * M, C, T, V)
 
-        for gcn, importance in zip(self.st_gcn_networks, self.edge_importance):
-            x, _ = gcn(x, self.A * importance)
+        for gcn in self.gcn_layers:
+            x = gcn(x, self.A)
 
-        x = F.avg_pool2d(x, x.size()[2:])
-        x = x.view(N, -1, 1, 1)
+        x = x.mean(dim=2, keepdim=True)   # T 방향 GAP → (N, C, 1, V)
+        x = x.mean(dim=3, keepdim=True)   # V 방향 GAP → (N, C, 1, 1)
         x = self.fcn(x)
-        x = x.view(x.size(0), -1)
-        return x
+        return x.view(x.size(0), -1)
+
+
+# ============================================================
+# IMU_DualBranch : GCN branch (공간) + TCN branch (시간) 병렬
+# ============================================================
+class IMU_DualBranch(nn.Module):
+    """
+    GCN branch : 7× _SpatialGCNBlock → T 평균 → (B, V=10,  256) 센서 토큰
+    TCN branch : 7× _TCNResBlock     →          (B, T'=25, 128) 시간 토큰
+
+    양방향 Cross-Attention:
+      G→T : 각 센서가 시간 패턴 중 어디에 attend → (B, V,  256)
+      T→G : 각 시간 step이 어느 센서에 attend   → (B, T', 128)
+    mean → concat(384) → Dropout → FC → 100
+    """
+    def __init__(self, in_channels=3, num_class=100,
+                 graph_args=None,
+                 gcn_dims=(64, 64, 64, 128, 128, 128, 256),
+                 tcn_hidden=128, tcn_kernel=11,
+                 edge_importance_weighting=True,
+                 num_heads=4, dropout=0.2):
+        super().__init__()
+        self.in_channels = in_channels
+        if graph_args is None:
+            graph_args = {'max_hop': 1, 'dilation': 1}
+
+        # ── GCN branch ──
+        self.graph = Graph(**graph_args)
+        A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
+        self.register_buffer('A', A)
+        V = A.size(1)
+
+        self.gcn_bn = nn.BatchNorm1d(in_channels * V)
+        dims = [in_channels] + list(gcn_dims)
+        self.gcn_layers = nn.ModuleList([
+            _SpatialGCNBlock(dims[i], dims[i+1], dropout=(0.0 if i == 0 else dropout))
+            for i in range(len(dims) - 1)
+        ])
+        if edge_importance_weighting:
+            self.edge_importance = nn.ParameterList([
+                nn.Parameter(torch.ones(A.size()))
+                for _ in self.gcn_layers
+            ])
+        else:
+            self.edge_importance = [1] * len(self.gcn_layers)
+        gcn_out = gcn_dims[-1]   # 256
+
+        # ── TCN branch ──
+        tcn_layers = []
+        for i in range(7):
+            in_ch  = in_channels * V if i == 0 else tcn_hidden
+            stride = 2 if i in (0, 2, 4) else 1
+            tcn_layers.append(_TCNResBlock(in_ch, tcn_hidden, tcn_kernel,
+                                           stride=stride, dropout=dropout))
+        self.tcn_layers = nn.Sequential(*tcn_layers)
+        tcn_out = tcn_hidden   # 128
+
+        # ── Cross-Attention (양방향) ──
+        # G→T : Q=GCN(256), KV=TCN(128)
+        self.cross_g2t = nn.MultiheadAttention(
+            embed_dim=gcn_out, num_heads=num_heads,
+            kdim=tcn_out, vdim=tcn_out,
+            batch_first=True, dropout=dropout)
+        # T→G : Q=TCN(128), KV=GCN(256)
+        self.cross_t2g = nn.MultiheadAttention(
+            embed_dim=tcn_out, num_heads=num_heads,
+            kdim=gcn_out, vdim=gcn_out,
+            batch_first=True, dropout=dropout)
+
+        self.drop = nn.Dropout(dropout)
+        self.fcn  = nn.Linear(gcn_out + tcn_out, num_class)
+
+    def forward(self, x_IMU):
+        B, T, D = x_IMU.shape
+        V = 10
+
+        # ── GCN branch → (B, V, gcn_out) ──
+        xg = x_IMU.view(B, T, V, self.in_channels).permute(0, 3, 1, 2).contiguous()
+        xg = xg.view(B, self.in_channels * V, T)
+        xg = self.gcn_bn(xg)
+        xg = xg.view(B, self.in_channels, T, V)
+        for gcn, imp in zip(self.gcn_layers, self.edge_importance):
+            xg = gcn(xg, self.A * imp)
+        z_graph_seq = xg.mean(dim=2).permute(0, 2, 1)  # (B, V=10, 256)
+
+        # ── TCN branch → (B, T', tcn_out) ──
+        xt = x_IMU.transpose(1, 2)       # (B, 30, T)
+        xt = self.tcn_layers(xt)         # (B, 128, T'=25)
+        z_temp_seq = xt.permute(0, 2, 1) # (B, T'=25, 128)
+
+        # ── 양방향 Cross-Attention ──
+        # 각 센서가 시간 패턴 어디에 집중할지
+        z_g2t, _ = self.cross_g2t(z_graph_seq, z_temp_seq, z_temp_seq)  # (B, V,  256)
+        # 각 시간 step이 어느 센서에 집중할지
+        z_t2g, _ = self.cross_t2g(z_temp_seq, z_graph_seq, z_graph_seq) # (B, T', 128)
+
+        z_graph = z_g2t.mean(dim=1)   # (B, 256)
+        z_temp  = z_t2g.mean(dim=1)   # (B, 128)
+
+        z = torch.cat([z_graph, z_temp], dim=1)   # (B, 384)
+        return self.fcn(self.drop(z))
 
 
 #biLSTM 수정본
@@ -396,6 +613,7 @@ class BiLSTM(nn.Module):
         logits = self.fc(feat)
 
         return (logits, feat) if return_feat else logits
+
 
 class PreNormTransformerEncoder(nn.Module):
     def __init__(self, encoder_layer, num_layers):
@@ -633,3 +851,120 @@ class IMU_conso_processing_Transformer(nn.Module):
         feat = out.mean(dim=1)     # (B,d_model)
         logits = self.classifier(feat)
         return (logits, feat) if return_feat else logits
+
+
+# ============================================================
+# IMU Conformer
+# ============================================================
+class _ConformerConvModule(nn.Module):
+    def __init__(self, d_model, kernel_size, dropout):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.pw1  = nn.Linear(d_model, d_model * 2)
+        self.dw   = nn.Conv1d(d_model, d_model, kernel_size,
+                              padding=kernel_size // 2, groups=d_model)
+        self.bn   = nn.BatchNorm1d(d_model)
+        self.pw2  = nn.Linear(d_model, d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x: (B, T, d_model)
+        x = self.norm(x)
+        x = self.pw1(x)                     # (B, T, d_model*2)
+        x = F.glu(x, dim=-1)               # (B, T, d_model)
+        x = x.transpose(1, 2)              # (B, d_model, T)
+        x = self.dw(x)
+        x = self.bn(x)
+        x = F.silu(x)
+        x = x.transpose(1, 2)              # (B, T, d_model)
+        x = self.pw2(x)
+        return self.drop(x)
+
+
+class _ConformerBlock(nn.Module):
+    def __init__(self, d_model, nhead, ff_dim, kernel_size, dropout):
+        super().__init__()
+        self.norm_ff1  = nn.LayerNorm(d_model)
+        self.ff1       = nn.Sequential(
+            nn.Linear(d_model, ff_dim), nn.SiLU(), nn.Dropout(dropout),
+            nn.Linear(ff_dim, d_model), nn.Dropout(dropout),
+        )
+        self.norm_attn = nn.LayerNorm(d_model)
+        self.attn      = nn.MultiheadAttention(d_model, nhead,
+                                               dropout=dropout, batch_first=True)
+        self.drop_attn = nn.Dropout(dropout)
+        self.conv      = _ConformerConvModule(d_model, kernel_size, dropout)
+        self.norm_ff2  = nn.LayerNorm(d_model)
+        self.ff2       = nn.Sequential(
+            nn.Linear(d_model, ff_dim), nn.SiLU(), nn.Dropout(dropout),
+            nn.Linear(ff_dim, d_model), nn.Dropout(dropout),
+        )
+        self.norm_out  = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        x = x + 0.5 * self.ff1(self.norm_ff1(x))
+        x_n = self.norm_attn(x)
+        x = x + self.drop_attn(self.attn(x_n, x_n, x_n)[0])
+        x = x + self.conv(x)
+        x = x + 0.5 * self.ff2(self.norm_ff2(x))
+        return self.norm_out(x)
+
+
+class IMU_Conformer(nn.Module):
+    def __init__(self, num_classes=100, in_channels=30, d_model=128, nhead=4,
+                 num_layers=4, ff_dim=512, conv_kernel_size=15, dropout=0.1): #conv_kernel_size 변경
+        super().__init__()
+        self.proj = nn.Linear(in_channels, d_model)
+        self.pe   = nn.Parameter(torch.zeros(1, 200, d_model))
+        self.drop = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList([
+            _ConformerBlock(d_model, nhead, ff_dim, conv_kernel_size, dropout)
+            for _ in range(num_layers)
+        ])
+        self.fc = nn.Linear(d_model, num_classes)
+
+    def forward(self, x):
+        # x: (B, T, C) = (B, 200, 30)
+        x = self.proj(x) + self.pe[:, :x.size(1)]
+        x = self.drop(x)
+        for block in self.blocks:
+            x = block(x)
+        x = x.mean(dim=1)   # GAP over T
+        return self.fc(x)
+
+
+class IMU_ConformerBiLSTM(nn.Module):
+    """
+    Kwon et al. (2024) 구조:
+    Linear → Conformer × 4 → BiLSTM × 2 → mean pool → FC
+    """
+    def __init__(self, num_classes=100, in_channels=30, d_model=128, nhead=4,
+                 num_conformer_layers=4, ff_dim=384, conv_kernel_size=31,
+                 lstm_hidden=128, num_lstm_layers=2, dropout=0.1):
+        super().__init__()
+        self.proj = nn.Linear(in_channels, d_model)
+        self.pe   = nn.Parameter(torch.zeros(1, 200, d_model))
+        self.drop = nn.Dropout(dropout)
+        self.conformer_blocks = nn.ModuleList([
+            _ConformerBlock(d_model, nhead, ff_dim, conv_kernel_size, dropout)
+            for _ in range(num_conformer_layers)
+        ])
+        self.bilstm = nn.LSTM(
+            input_size=d_model,
+            hidden_size=lstm_hidden,
+            num_layers=num_lstm_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if num_lstm_layers > 1 else 0.0,
+        )
+        self.fc = nn.Linear(lstm_hidden * 2, num_classes)
+
+    def forward(self, x):
+        # x: (B, T, C) = (B, 200, 30)
+        x = self.proj(x) + self.pe[:, :x.size(1)]
+        x = self.drop(x)
+        for block in self.conformer_blocks:
+            x = block(x)                 # (B, T, d_model)
+        x, _ = self.bilstm(x)           # (B, T, 2*lstm_hidden)
+        x = x.mean(dim=1)               # mean pool over T
+        return self.fc(x)
