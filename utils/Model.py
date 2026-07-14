@@ -344,24 +344,27 @@ class _TCNResBlock(nn.Module):
         self.act  = nn.ReLU(inplace=True)
         self.drop = nn.Dropout(dropout)
         if in_channels != out_channels or stride != 1:
-            self.res = nn.Conv1d(in_channels, out_channels, 1, stride=stride)
+            self.res = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, 1, stride=stride),
+                nn.BatchNorm1d(out_channels),
+            )
         else:
             self.res = nn.Identity()
 
     def forward(self, x):
-        return self.act(self.bn(self.drop(self.conv(x))) + self.res(x))
+        return self.drop(self.act(self.bn(self.conv(x)) + self.res(x)))
 
 
 class PureTCN(nn.Module):
     """7겹 TCN. 입력 (N, T, 30). 그래프 없음.
-    stride=2 를 3회(layer 0,2,4) 사용 → 200→100→50→25 후 GAP."""
+    stride=2 를 3회(layer 2,4,6) 사용 → 200→100→50→25 후 GAP."""
     def __init__(self, num_classes=100, in_channels=30, hidden_dim=128,
                  num_layers=7, kernel_size=11, dropout=0.2):
         super().__init__()
         layers = []
         for i in range(num_layers):
             in_ch  = in_channels if i == 0 else hidden_dim
-            stride = 2 if i in (0, 2, 4) else 1
+            stride = 2 if i in (2, 4, 6) else 1
             layers.append(_TCNResBlock(in_ch, hidden_dim, kernel_size, stride=stride, dropout=dropout))
         self.net  = nn.Sequential(*layers)
         self.drop = nn.Dropout(dropout)
