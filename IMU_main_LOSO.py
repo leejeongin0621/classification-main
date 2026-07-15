@@ -25,8 +25,8 @@ subject_list = ['250805_KDY','250731_LGE','260709_LJS','250812_WDY','250814_JCM'
 #left='250804_KTS','250805_SMC','250811_LPR','250811_JHS','250812_HHJ','250813_YMS','250814_CYJ','250819_CYK','260713_LSW', '250827_HJH'
 #right='250805_KDY','250731_LGE','260709_LJS','250812_WDY','250814_JCM','250818_ICY','250819_PYH','250820_LTG','250822_JSH','250825_JDB'
 
-model_pt_path  = os.path.join('models', 'Model_140.pt')
-run_tag        = 'LOSO_30ch_ST-GCN_model40_analyze2'
+model_pt_path  = os.path.join('models', 'Model_144.pt')
+run_tag        = 'LOSO_30ch_ST-GCN_model44_cross-attn'
 
 num_subject = len(subject_list)
 num_session = 5

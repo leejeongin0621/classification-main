@@ -51,14 +51,14 @@ class Graph():
     #         self.edge = self_link + neighbor_link
 
     #right (top-20 Pearson)
-    def get_edge(self):
-            self.num_node = 10
-            self_link = [(i, i) for i in range(self.num_node)]
-            neighbor_link = [[6,7], [4,8],[3,4], [8,9],[7,8],
-                             [4,9],[7,9], [3,6], [4,7], [2,7],
-                             [6,8], [1,5], [2,3], [4,6],[5,7],
-                             [6,9], [1,3], [2,4], [3,7],[0,1]]
-            self.edge = self_link + neighbor_link
+    # def get_edge(self):
+    #         self.num_node = 10
+    #         self_link = [(i, i) for i in range(self.num_node)]
+    #         neighbor_link = [[6,7], [4,8],[3,4], [8,9],[7,8],
+    #                          [4,9],[7,9], [3,6], [4,7], [2,7],
+    #                          [6,8], [1,5], [2,3], [4,6],[5,7],
+    #                          [6,9], [1,3], [2,4], [3,7],[0,1]]
+    #         self.edge = self_link + neighbor_link
 
     #right (class separability) [0,2],[2,6]
     # def get_edge(self):
@@ -101,14 +101,14 @@ class Graph():
     #     self.edge = self_link + neighbor_link
 
     # fully connected graph — 모든 sensor 가 모든 sensor 와 연결 (free mixing)
-    # def get_edge(self):
-    #         self.num_node = 10
-    #         self_link = [(i, i) for i in range(self.num_node)]
-    #         neighbor_link = []
-    #         for i in range(self.num_node):
-    #             for j in range(i + 1, self.num_node):
-    #                 neighbor_link.append((i, j))
-    #         self.edge = self_link + neighbor_link
+    def get_edge(self):
+            self.num_node = 10
+            self_link = [(i, i) for i in range(self.num_node)]
+            neighbor_link = []
+            for i in range(self.num_node):
+                for j in range(i + 1, self.num_node):
+                    neighbor_link.append((i, j))
+            self.edge = self_link + neighbor_link
 
     def get_adjacency(self):
         valid_hop = range(0, self.max_hop + 1, self.dilation)

@@ -183,154 +183,6 @@ class st_gcn(nn.Module):
         x = self.tcn(x) + res
         return self.relu(x), A
 
-
-# ============================================================
-# GAST-Net 스타일 IMU 분류 모델
-# TCN block (시간만) + Graph Attn block (공간만) 교차 배치
-# ============================================================
-
-class _TemporalBlock(nn.Module):
-    """순수 시간 방향 Conv: kernel (k,1) — 센서 간 관계 무관"""
-    def __init__(self, in_ch, out_ch, kernel_size=9, stride=1, dropout=0.2):
-        super().__init__()
-        pad = (kernel_size - 1) // 2
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, (kernel_size, 1), stride=(stride, 1), padding=(pad, 0)),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Conv2d(out_ch, out_ch, 1),
-            nn.BatchNorm2d(out_ch),
-        )
-        self.res  = (nn.Sequential(nn.Conv2d(in_ch, out_ch, 1, stride=(stride, 1)),
-                                   nn.BatchNorm2d(out_ch))
-                     if in_ch != out_ch or stride != 1 else nn.Identity())
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        return self.relu(self.net(x) + self.res(x))
-
-
-class _GraphAttnBlock(nn.Module):
-    """Local GCN (F-stat 그래프) + Global Bk attention 병렬 → concat
-       시간 방향은 건드리지 않음 (공간 처리 전용)
-    """
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        half = out_ch // 2
-        dk   = max(in_ch // 4, 1)
-
-        # Local branch: F-stat adjacency 기반 GCN
-        self.local_conv = nn.Conv2d(in_ch, half, 1)
-        self.local_bn   = nn.BatchNorm2d(half)
-
-        # Global branch: Bk attention (입력 기반 동적 adjacency)
-        self.dk         = dk
-        self.theta      = nn.Conv1d(in_ch, dk, 1)
-        self.phi        = nn.Conv1d(in_ch, dk, 1)
-        self.global_conv = nn.Conv2d(in_ch, half, 1)
-        self.global_bn   = nn.BatchNorm2d(half)
-
-        self.out_bn = nn.BatchNorm2d(out_ch)
-        self.res    = (nn.Sequential(nn.Conv2d(in_ch, out_ch, 1), nn.BatchNorm2d(out_ch))
-                       if in_ch != out_ch else nn.Identity())
-        self.relu   = nn.ReLU(inplace=True)
-
-    def forward(self, x, A):
-        # x: (B, C, T, V),  A: (K, V, V)
-        res = self.res(x)
-
-        # A: (K,V,V) → 합산해서 (V,V)
-        A_sum = A.sum(0)  # (V, V)
-
-        # Local: 이웃 집계 → conv
-        x_loc = torch.einsum('vw,bctw->bctv', A_sum, x)
-        x_loc = self.local_bn(self.local_conv(x_loc))    # (B, half, T, V)
-
-        # Global: Bk attention
-        xv    = x.mean(dim=2)                            # (B, C, V)  temporal avg
-        theta = self.theta(xv)                           # (B, dk, V)
-        phi   = self.phi(xv)                             # (B, dk, V)
-        attn  = torch.einsum('bdi,bdj->bij', theta, phi) / math.sqrt(self.dk)
-        attn  = F.softmax(attn, dim=-1)                  # (B, V, V)
-        x_glo = torch.einsum('bij,bctj->bcti', attn, x) # (B, C, T, V)
-        x_glo = self.global_bn(self.global_conv(x_glo)) # (B, half, T, V)
-
-        out = torch.cat([x_loc, x_glo], dim=1)          # (B, out_ch, T, V)
-        return self.relu(self.out_bn(out) + res)
-
-
-class IMU_GASTNet(nn.Module):
-    """
-    GAST-Net 스타일 IMU 100클래스 분류 모델
-    구조: TCN → GAttn → TCN → GAttn → TCN → GAttn → GAP → FC
-
-    TCN block : 시간 방향만 처리 (stride로 T 축소)
-    GAttn block: 공간 방향만 처리 (Local F-stat 그래프 + Global Bk attention)
-    """
-    def __init__(self, in_channels, num_class, graph_args,
-                 edge_importance_weighting=True, dropout=0.2):
-        super().__init__()
-        self.in_channels = in_channels
-        V = 10
-
-        self.graph = Graph(**graph_args)
-        A = torch.tensor(self.graph.A, dtype=torch.float32, requires_grad=False)
-        self.register_buffer('A', A)
-
-        self.data_bn = nn.BatchNorm1d(in_channels * V)
-
-        # TCN blocks (시간 처리)                  in  out  stride  T 변화
-        self.tcn1 = _TemporalBlock( in_channels,  64, stride=1, dropout=dropout)  # 200→200
-        self.tcn2 = _TemporalBlock(128, 128,       stride=2, dropout=dropout)      # 200→100
-        self.tcn3 = _TemporalBlock(256, 256,       stride=2, dropout=dropout)      # 100→50
-
-        # Graph Attention blocks (공간 처리)       in   out
-        self.gattn1 = _GraphAttnBlock( 64, 128)   # 64→128
-        self.gattn2 = _GraphAttnBlock(128, 256)   # 128→256
-        self.gattn3 = _GraphAttnBlock(256, 256)   # 256→256
-
-        if edge_importance_weighting:
-            self.edge_importance = nn.ParameterList([
-                nn.Parameter(torch.ones(A.size())) for _ in range(3)
-            ])
-        else:
-            self.edge_importance = [1, 1, 1]
-
-        self.fcn  = nn.Linear(256, num_class)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x_IMU):
-        B, T, D = x_IMU.shape
-        V = 10
-
-        # (B, T, 30) → (B, C, T, V)
-        x = x_IMU.view(B, T, V, self.in_channels).permute(0, 3, 1, 2).contiguous()
-
-        # BatchNorm: (B, C*V, T)
-        x = x.permute(0, 1, 3, 2).contiguous().view(B, self.in_channels * V, T)
-        x = self.data_bn(x)
-        x = x.view(B, self.in_channels, V, T).permute(0, 1, 3, 2).contiguous()  # (B, C, T, V)
-
-        # Block 1: TCN → GAttn
-        x = self.tcn1(x)
-        x = self.gattn1(x, self.A * self.edge_importance[0])
-
-        # Block 2: TCN → GAttn
-        x = self.tcn2(x)
-        x = self.gattn2(x, self.A * self.edge_importance[1])
-
-        # Block 3: TCN → GAttn
-        x = self.tcn3(x)
-        x = self.gattn3(x, self.A * self.edge_importance[2])
-
-        # GAP over (T, V) → (B, 256)
-        x = x.mean(dim=[2, 3])
-        x = self.drop(x)
-        x = self.fcn(x)
-        return x
-
-
 # ============================================================
 # Pure TCN (그래프 없음, 시간만)
 # ============================================================
@@ -554,8 +406,9 @@ class IMU_GateFusion(nn.Module):
     """
     (B,200,30) → Shared LocalCNN (sensor-wise, stride=2) → (B,64,10,100)
         GCN branch : _SpatialGCNBlock x3 → node-attn pool → BiLSTM(128,64,bidir) → mean+max → (B,256)
-        TCN branch : flatten C*V → Conv1d(640,64,1) → Conv1d x3 (k=7,9,11) → mean+max → (B,256)
-    concat (B,512) → fusion FC (512→256→100)
+        TCN branch : flatten C*V → Conv1d(640,64,1) → Conv1d x5 (k=7,7,9,9,11) → (B,50,128)
+    Cross-Attention: GCN(T=100)→TCN(T=50), TCN→GCN (residual) → mean+max → (B,256) each
+    concat (B,512) → Dropout → Linear(512→100)
     Always returns (main_logits, gcn_logits, tcn_logits).
     Loss = main + 0.2*gcn + 0.2*tcn
     """
@@ -581,12 +434,10 @@ class IMU_GateFusion(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # ── GCN branch (5 layers) ──
+        # ── GCN branch (3 layers) ──
         self.gcn_layers = nn.ModuleList([
             _SpatialGCNBlock(64,  64,  K=K, dropout=dropout),
-            _SpatialGCNBlock(64,  64,  K=K, dropout=dropout),
             _SpatialGCNBlock(64,  96,  K=K, dropout=dropout),
-            _SpatialGCNBlock(96,  96,  K=K, dropout=dropout),
             _SpatialGCNBlock(96,  128, K=K, dropout=dropout),
         ])
         self.edge_importance = nn.ParameterList([
@@ -595,6 +446,10 @@ class IMU_GateFusion(nn.Module):
 
         self.node_attn  = nn.Linear(128, 1)
         self.gcn_bilstm = nn.LSTM(128, 64, batch_first=True, bidirectional=True)
+
+        # ── Cross-Attention: GCN(T=100) ↔ TCN(T=50) ──
+        self.cross_g2t = nn.MultiheadAttention(embed_dim=128, num_heads=4, batch_first=True, dropout=dropout)
+        self.cross_t2g = nn.MultiheadAttention(embed_dim=128, num_heads=4, batch_first=True, dropout=dropout)
 
         # ── TCN branch (5 layers, kernels 7,7,9,9,11) ──
         self.tcn_proj = nn.Conv1d(64 * num_sensor, 64, kernel_size=1)
@@ -627,10 +482,7 @@ class IMU_GateFusion(nn.Module):
         # ── Fusion classifier ──
         self.fusion_fc = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(512, 256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(256, num_class),
+            nn.Linear(512, num_class),
         )
 
     def _mean_max(self, x):
@@ -658,13 +510,19 @@ class IMU_GateFusion(nn.Module):
         xg = (xg_t * score).sum(dim=2).permute(0, 2, 1)       # (B,C=128,T=100)
 
         xg, _ = self.gcn_bilstm(xg.permute(0, 2, 1))  # (B,100,128)
-        h_g = self.gcn_ln(self._mean_max(xg))          # (B,256)
 
         # ── TCN branch ──
         xt = x.reshape(B, -1, x.shape[-1])      # (B, 640, 100) — flatten C×V
         xt = self.tcn_proj(xt)                   # (B, 64, 100)
         xt = self.tcn(xt)                        # (B,128,50)
-        h_t = self.tcn_ln(self._mean_max(xt.permute(0, 2, 1)))    # (B,256)
+        xt_seq = xt.permute(0, 2, 1)             # (B,50,128)
+
+        # ── Cross-Attention ──
+        xg_cross, _ = self.cross_g2t(xg, xt_seq, xt_seq)    # GCN queries TCN: (B,100,128)
+        xt_cross, _ = self.cross_t2g(xt_seq, xg, xg)        # TCN queries GCN: (B,50,128)
+
+        h_g = self.gcn_ln(self._mean_max(xg + xg_cross))         # (B,256)
+        h_t = self.tcn_ln(self._mean_max(xt_seq + xt_cross))     # (B,256)
 
         # ── Auxiliary logits ──
         gcn_logits = self.gcn_aux(h_g)

@@ -2,7 +2,7 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import torch
-from utils.Model import PureTCN, PureGCN, IMU_Conformer, IMU_ConformerBiLSTM, IMU_Transformer,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM,IMU_GASTNet,IMU_DualBranch,IMU_GateFusion
+from utils.Model import PureTCN, PureGCN, IMU_Conformer, IMU_ConformerBiLSTM, IMU_Transformer,IMU_conso_processing_Transformer,IMU_STGCN,BiLSTM,IMU_DualBranch,IMU_GateFusion
 from os import path
 from pathlib import Path
 
@@ -83,37 +83,6 @@ k=0
 #     dropout=0.2,
 # ).to(device)
 
-# ── 135: IMU_GASTNet (GAST-Net 스타일: TCN↔GAttn 교차, Local F-stat + Global Bk)
-# model = IMU_GASTNet(
-#     in_channels=3,
-#     num_class=100,
-#     graph_args={'max_hop': 1, 'dilation': 1},
-#     edge_importance_weighting=True,
-#     dropout=0.2,
-# ).to(device)
-
-# ── 136: IMU_STGCN_TPP (ST-GCN + Temporal Pyramid Pooling, scales=[1,2,4])
-# model = IMU_STGCN_TPP(
-#     in_channels=3,
-#     num_class=100,
-#     graph_args={'max_hop': 1, 'dilation': 1},
-#     edge_importance_weighting=True,
-#     dropout=0.2,
-#     tpp_scales=(1, 2, 4),
-# ).to(device)
-
-# ── 136: IMU_DualBranch (GCN branch 7겹 + TCN branch 7겹 병렬 → cross-attn → FC)
-# model = IMU_DualBranch(
-#     in_channels=3,
-#     num_class=100,
-#     graph_args={'max_hop': 1, 'dilation': 1},
-#     gcn_dims=(64, 64, 64, 128, 128, 128, 256),
-#     tcn_hidden=128,
-#     tcn_kernel=11,
-#     edge_importance_weighting=True,
-#     num_heads=4,
-#     dropout=0.2,
-# ).to(device)
 
 # ── 138: IMU_GateFusion (SharedLocalCNN → GCN+TCN → BranchGate → FusionFC)
 model = IMU_GateFusion(
@@ -126,7 +95,7 @@ model = IMU_GateFusion(
 
 # 모델 전체 저장
 Path("models").mkdir(exist_ok=True)
-model_num = 140
+model_num = 144
 save_path = f"./models/Model_{model_num}.pt"
 
 
@@ -148,7 +117,7 @@ else:
 # 모델 전체 불러오기
 import torch
 
-model_num = 140
+model_num = 144
 
 save_path = "./models/Model_{}.pt".format(model_num)
 model_loaded = torch.load(save_path, weights_only=False, map_location=device)
@@ -161,4 +130,4 @@ print(model_loaded)
 # #115 ms_stgcn (k=3∥k=11 multi-scale TCN)/gatedtcn/gcn3겹+tcn7겹 #116 gcn 3겹 +tcn 5겹 #117 gated tcn/ 지금은 edge feature 이용한거 symmetric하지 않는거 #118 edge feature 이용한 symmetric한거 #119 edge TCN + line-graph 
 # 120 : 119 수정본 ### 122 : LOG로 WEIGHTED GRAPH 만들어줌 
 # #123 : linear weighted graph (top20 edge) #124 : 첫단꺼 residual 반영(잘 안나옴) #125 : tcn->gcn-> tcn #126 #127 : bilstm(lr=0.0005 돌린거 ) #128 : dropout 비율을 달리해봄 
-#131 : Conformer+bilstm
+#131 : Conformer+bilstm #140 : IMU_GateFusion (SharedLocalCNN → GCN+TCN → BranchGate → FusionFC) #141 : 5겹으로 늘려봄 #142 : gcn_3,tcn_5
